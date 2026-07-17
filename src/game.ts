@@ -1,7 +1,11 @@
 import { SPR } from './sprites'
+import { frame } from './assets'
 import { Input } from './input'
 import { sfx, toggleMute, isMuted } from './audio'
 import { clamp, rand, pick, chance, dist2, shuffle, fmtTime } from './util'
+
+// 各敌人贴图渲染缩放（0x72 原始尺寸不同）
+const ENEMY_DRAW_SCALE: Record<string, number> = { slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6 }
 
 export const VW = 480
 export const VH = 270
@@ -675,36 +679,51 @@ export class Game {
       g.beginPath(); g.arc(W(this.px), H(this.py), r, 0, Math.PI * 2); g.stroke()
     }
 
-    // 掉落物
-    for (const gem of this.gems) this.blit(SPR.gem, W(gem.x), H(gem.y))
+    // 掉落物：金币（4 帧旋转）+ 红药水
+    const coinF = Math.floor(this.frameT * 8) % 4
+    for (const gem of this.gems) {
+      this.shadow(W(gem.x), H(gem.y) + 4, 3)
+      g.drawImage(frame('gem', coinF), Math.round(W(gem.x) - 4), Math.round(H(gem.y) - 4))
+    }
     for (const h of this.hearts) {
       const bob = Math.sin(this.frameT * 4 + h.x) * 1.5
-      this.blit(SPR.heart, W(h.x), H(h.y) + bob)
+      this.shadow(W(h.x), H(h.y) + 7, 5)
+      g.drawImage(frame('heart', 0), Math.round(W(h.x) - 8), Math.round(H(h.y) - 8 + bob))
     }
 
-    // 敌人
-    const frame = Math.floor(this.frameT * 6) % 2 + 1
+    // 敌人（4 帧奔跑动画，朝向玩家翻转）
     for (const e of this.enemies) {
-      const spr = SPR[`${e.kind}${frame}`] || SPR[`${e.kind}1`]
+      const af = Math.floor(this.frameT * 8 + e.id) % 4
+      const faceLeft = this.px < e.x
+      const scale = ENEMY_DRAW_SCALE[e.kind] ?? 1
+      const img = frame(e.kind, af, faceLeft) as CanvasImageSource
+      const iw = (img as any).width * scale
+      const ih = (img as any).height * scale
+      this.shadow(W(e.x), H(e.y) + ih / 2 - 2, iw * 0.35)
       if (e.flash > 0) g.filter = 'brightness(3)'
-      this.blit(spr, W(e.x), H(e.y), e.scale)
+      g.drawImage(img, Math.round(W(e.x) - iw / 2), Math.round(H(e.y) - ih / 2), iw, ih)
       g.filter = 'none'
       // 精英/Boss 血条
       if (e.kind === 'elite' || e.kind === 'boss') {
-        const bw = e.kind === 'boss' ? 30 : 20
+        const bw = e.kind === 'boss' ? 40 : 24
+        const by = H(e.y) - ih / 2 - 5
         g.fillStyle = '#26233a'
-        g.fillRect(W(e.x) - bw / 2, H(e.y) - e.r * e.scale - 8, bw, 3)
+        g.fillRect(W(e.x) - bw / 2, by, bw, 3)
         g.fillStyle = '#ff4f6b'
-        g.fillRect(W(e.x) - bw / 2, H(e.y) - e.r * e.scale - 8, bw * clamp(e.hp / e.maxHp, 0, 1), 3)
+        g.fillRect(W(e.x) - bw / 2, by, bw * clamp(e.hp / e.maxHp, 0, 1), 3)
       }
     }
 
-    // 玩家（受击时闪烁）
+    // 玩家（idle/run 各 4 帧，受击闪烁）
     const blink = this.invuln > 0 && Math.floor(this.frameT * 12) % 2 === 0
     if (!blink) {
-      const walking = this.moving && Math.floor(this.frameT * 8) % 2 === 0
-      const key = (this.face > 0 ? 'hero' : 'heroF') + (walking ? '2' : '1')
-      this.blit(SPR[key], W(this.px), H(this.py))
+      const key = this.moving ? 'player_run' : 'player_idle'
+      const pf = Math.floor(this.frameT * (this.moving ? 10 : 5)) % 4
+      const pimg = frame(key, pf, this.face < 0) as CanvasImageSource
+      this.shadow(W(this.px), H(this.py) + 13, 6)
+      if (this.invuln > 0) g.filter = 'brightness(1.6)'
+      g.drawImage(pimg, Math.round(W(this.px) - 8), Math.round(H(this.py) - 14))
+      g.filter = 'none'
     }
 
     // 环绕法球
@@ -770,6 +789,18 @@ export class Game {
   blit(spr: HTMLCanvasElement, x: number, y: number, scale = 1) {
     const w = spr.width * scale, h = spr.height * scale
     this.g.drawImage(spr, Math.round(x - w / 2), Math.round(y - h / 2), w, h)
+  }
+
+  // 椭圆投影，增强立体感
+  shadow(x: number, y: number, rx: number) {
+    const g = this.g
+    g.save()
+    g.globalAlpha = 0.28
+    g.fillStyle = '#000'
+    g.beginPath()
+    g.ellipse(Math.round(x), Math.round(y), rx, rx * 0.42, 0, 0, Math.PI * 2)
+    g.fill()
+    g.restore()
   }
 
   drawGround(cx: number, cy: number) {
@@ -963,34 +994,47 @@ export class Game {
       g.fillStyle = i % 3 === 0 ? '#171a2e' : '#141830'
       g.fillRect(Math.floor(x), y, 2, 2)
     }
-    // 主角立绘
-    const spr = Math.floor(this.frameT * 3) % 2 === 0 ? SPR.hero1 : SPR.hero2
+    // 主角立绘（骑士 idle 动画，头顶橙色羽饰）
+    const spr = frame('player_idle', Math.floor(this.frameT * 5) % 4) as CanvasImageSource
     g.imageSmoothingEnabled = false
-    g.drawImage(spr, VW / 2 - 24, 52, 48, 52)
+    const kh = 84, kw = 48
+    this.shadow(VW / 2, 22 + kh, 16)
+    g.drawImage(spr, VW / 2 - kw / 2, 20, kw, kh)
     // 标题
     g.textAlign = 'center'
     g.font = 'bold 26px monospace'
     g.fillStyle = '#ffd75e'
-    g.fillText('像 素 幸 存 者', VW / 2, 140)
+    g.fillText('像 素 幸 存 者', VW / 2, 134)
     g.font = '10px monospace'
     g.fillStyle = '#57c7ff'
-    g.fillText('- PIXEL SURVIVORS -', VW / 2, 158)
+    g.fillText('- PIXEL SURVIVORS -', VW / 2, 152)
+    // 敌人展示行
+    const foes: EnemyKind[] = ['slime', 'bat', 'skel', 'elite', 'boss']
+    const ef = Math.floor(this.frameT * 6) % 4
+    let fx = VW / 2 - (foes.length - 1) * 20 / 2
+    for (const k of foes) {
+      const fi = frame(k, ef) as CanvasImageSource
+      const s = k === 'boss' ? 1.2 : k === 'elite' ? 0.9 : 1.1
+      const w = (fi as any).width * s, hh = (fi as any).height * s
+      g.drawImage(fi, Math.round(fx - w / 2), Math.round(176 - hh / 2), w, hh)
+      fx += 20
+    }
     // 最佳纪录
     if (this.best.time > 0) {
       g.fillStyle = '#9aa4c8'
       g.font = '8px monospace'
       const wins = this.best.wins > 0 ? ` · 通关 ${this.best.wins} 次` : ''
-      g.fillText(`最佳纪录  存活 ${fmtTime(this.best.time)} · 击杀 ${this.best.kills}${wins}`, VW / 2, 180)
+      g.fillText(`最佳纪录  存活 ${fmtTime(this.best.time)} · 击杀 ${this.best.kills}${wins}`, VW / 2, 198)
     }
     // 开始提示（闪烁）
     if (Math.floor(this.frameT * 2) % 2 === 0) {
       g.font = 'bold 11px monospace'
       g.fillStyle = '#ffffff'
-      g.fillText('点击 或 按 Enter 开始', VW / 2, 210)
+      g.fillText('点击 或 按 Enter 开始', VW / 2, 220)
     }
     g.font = '8px monospace'
     g.fillStyle = '#5c6285'
-    g.fillText('WASD 移动 · 武器自动攻击 · 升级三选一 · 坚持 5 分钟', VW / 2, 240)
-    g.fillText('P 暂停 · M 静音', VW / 2, 254)
+    g.fillText('WASD 移动 · 武器自动攻击 · 升级三选一 · 坚持 5 分钟', VW / 2, 242)
+    g.fillText('P 暂停 · M 静音', VW / 2, 255)
   }
 }

@@ -1,6 +1,7 @@
 import { Game, VW, VH } from './game'
 import { bindInput, Input } from './input'
 import { initAudio } from './audio'
+import { loadAssets } from './assets'
 
 const disp = document.getElementById('game') as HTMLCanvasElement
 const dctx = disp.getContext('2d')!
@@ -22,19 +23,35 @@ bindInput(() => ({ ox, oy, s: scale }))
 addEventListener('pointerdown', () => initAudio())
 addEventListener('keydown', () => initAudio())
 
-const game = new Game()
-let last = performance.now()
-
-function frame(now: number) {
-  const dt = Math.min(0.05, (now - last) / 1000)
-  last = now
-  game.update(dt)
-  game.draw()
-  dctx.imageSmoothingEnabled = false
+function drawLoading() {
   dctx.fillStyle = '#07070d'
   dctx.fillRect(0, 0, disp.width, disp.height)
-  dctx.drawImage(game.cv, ox, oy, VW * scale, VH * scale)
-  Input.flush()
+  dctx.fillStyle = '#9aa4c8'
+  dctx.font = '16px monospace'
+  dctx.textAlign = 'center'
+  dctx.fillText('加载素材中…', disp.width / 2, disp.height / 2)
+}
+drawLoading()
+
+loadAssets().then(start).catch(err => {
+  dctx.fillStyle = '#ff4f6b'
+  dctx.fillText('素材加载失败: ' + err.message, disp.width / 2, disp.height / 2 + 24)
+})
+
+function start() {
+  const game = new Game()
+  let last = performance.now()
+  function frame(now: number) {
+    const dt = Math.min(0.05, (now - last) / 1000)
+    last = now
+    game.update(dt)
+    game.draw()
+    dctx.imageSmoothingEnabled = false
+    dctx.fillStyle = '#07070d'
+    dctx.fillRect(0, 0, disp.width, disp.height)
+    dctx.drawImage(game.cv, ox, oy, VW * scale, VH * scale)
+    Input.flush()
+    requestAnimationFrame(frame)
+  }
   requestAnimationFrame(frame)
 }
-requestAnimationFrame(frame)
