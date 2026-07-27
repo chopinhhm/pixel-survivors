@@ -19,6 +19,7 @@ const MANIFEST: Record<string, string[]> = {
   gem: frames('coin_anim', 4),
   heart: ['flask_red.png'],
   heart_big: ['flask_big_red.png'],
+  chest: frames('chest_full_open_anim', 3),
 }
 
 export const ANIM: Record<string, HTMLImageElement[]> = {}

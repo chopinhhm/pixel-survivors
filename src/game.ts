@@ -12,7 +12,8 @@ export const VH = 270
 
 const WIN_TIME = 300 // 坚持 5 分钟胜利
 const BOSS_TIME = 240
-const ELITE_TIMES = [80, 200]
+const ELITE_TIMES = [60, 140, 210]
+const SURGE_INTERVAL = 60 // 怪物狂潮周期
 
 type State = 'menu' | 'play' | 'levelup' | 'pause' | 'end'
 type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss'
@@ -24,20 +25,36 @@ interface Enemy {
   spd: number; dmg: number; r: number; xp: number
   flash: number; auraCd: number; orbCd: number
   scale: number
+  burn: number; burnT: number // 炼狱光环的持续燃烧
+  atkT: number // 远程攻击冷却（骷髅）
+  dashT: number; dashCd: number // 小恶魔突进
+  chargeT: number; chargeCd: number; chargeAng: number // 精英/Boss 冲锋
+  specialT: number // Boss 招式计时
   dead?: boolean
 }
 interface Proj { x: number; y: number; vx: number; vy: number; dmg: number; life: number; pierce: number; angle: number }
+interface EProj { x: number; y: number; vx: number; vy: number; dmg: number; life: number; r: number; color: string }
 interface Gem { x: number; y: number; val: number; vx: number; vy: number }
 interface Heart { x: number; y: number }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: string; size: number }
 interface FloatText { x: number; y: number; txt: string; life: number; color: string }
 interface Nova { x: number; y: number; r: number; maxR: number; dmg: number; hit: Set<number> }
 interface Bolt { pts: number[]; life: number }
-interface WeaponState { id: string; lv: number; t: number }
+interface WeaponState { id: string; lv: number; t: number; evolved: boolean }
+interface Chest { x: number; y: number; opened: number }
 
 interface UpDef {
   id: string; type: 'weapon' | 'passive' | 'snack'
   maxLv: number; name: string; desc: string; icon: string
+}
+
+// 武器进化：满级 + 对应被动 → 进化形态
+const EVO: Record<string, { need: string; name: string; desc: string }> = {
+  knife: { need: 'haste', name: '千刃风暴', desc: '进化！向四面八方掷出飞刀' },
+  orb: { need: 'power', name: '末日法球阵', desc: '进化！法球数量与威力暴增' },
+  nova: { need: 'vital', name: '超新星', desc: '进化！巨大的双重冲击波' },
+  bolt: { need: 'wisdom', name: '雷暴', desc: '进化！雷电如暴雨般落下' },
+  aura: { need: 'magnet', name: '炼狱', desc: '进化！烈焰灼烧并留下余烬' },
 }
 
 const UPG: UpDef[] = [
@@ -94,6 +111,11 @@ export class Game {
   face = 1
   moving = false
 
+  // 冲刺（主动技能）
+  dashT = 0 // 冲刺进行中剩余时间
+  dashCd = 0 // 冲刺冷却
+  dashX = 0; dashY = 0
+
   level = 1; xp = 0; xpNext = 8
   pendingLv = 0
   weapons: WeaponState[] = []
@@ -102,8 +124,10 @@ export class Game {
 
   enemies: Enemy[] = []
   projs: Proj[] = []
+  eprojs: EProj[] = [] // 敌方弹体
   gems: Gem[] = []
   hearts: Heart[] = []
+  chests: Chest[] = []
   novas: Nova[] = []
   bolts: Bolt[] = []
   parts: Particle[] = []
@@ -115,6 +139,12 @@ export class Game {
   bossSpawned = false
   boss: Enemy | null = null
   grid = new Map<string, Enemy[]>()
+
+  // 怪物狂潮事件
+  nextSurge = SURGE_INTERVAL
+  surgeMode = 0 // 剩余加速时间
+  // 击杀里程碑
+  nextMilestone = 100
 
   constructor() {
     this.cv.width = VW
@@ -134,13 +164,15 @@ export class Game {
     this.t = 0; this.kills = 0; this.shake = 0
     this.px = 0; this.py = 0
     this.maxHp = 100; this.hp = 100; this.invuln = 0
+    this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0
     this.level = 1; this.xp = 0; this.xpNext = 8; this.pendingLv = 0
-    this.weapons = [{ id: 'knife', lv: 1, t: 0.2 }]
+    this.weapons = [{ id: 'knife', lv: 1, t: 0.2, evolved: false }]
     this.passives = {}
-    this.enemies = []; this.projs = []; this.gems = []; this.hearts = []
-    this.novas = []; this.bolts = []; this.parts = []; this.floats = []
+    this.enemies = []; this.projs = []; this.eprojs = []; this.gems = []; this.hearts = []
+    this.chests = []; this.novas = []; this.bolts = []; this.parts = []; this.floats = []
     this.spawnT = 0.5; this.eid = 1; this.eliteIdx = 0
     this.bossSpawned = false; this.boss = null
+    this.nextSurge = SURGE_INTERVAL; this.surgeMode = 0; this.nextMilestone = 100
     this.win = false; this.newRecord = false
   }
 
@@ -189,28 +221,79 @@ export class Game {
     if (Input.down('a') || Input.down('arrowleft')) dx -= 1
     if (Input.down('d') || Input.down('arrowright')) dx += 1
     this.moving = dx !== 0 || dy !== 0
+    let mdx = 0, mdy = 0
     if (this.moving) {
       const len = Math.hypot(dx, dy)
-      this.px += (dx / len) * this.spd * dt
-      this.py += (dy / len) * this.spd * dt
+      mdx = dx / len; mdy = dy / len
       if (dx !== 0) this.face = dx > 0 ? 1 : -1
+    }
+    // ---- 冲刺（主动技能，带无敌帧）----
+    this.dashCd = Math.max(0, this.dashCd - dt)
+    if (this.dashT <= 0 && this.dashCd <= 0 && (Input.pressed('shift') || Input.pressed(' '))) {
+      this.dashT = 0.18
+      this.dashCd = 2.2
+      this.dashX = this.moving ? mdx : this.face
+      this.dashY = this.moving ? mdy : 0
+      this.invuln = Math.max(this.invuln, 0.32)
+      this.burst(this.px, this.py, '#9fdcff', 8)
+      sfx.shoot()
+    }
+    if (this.dashT > 0) {
+      this.dashT -= dt
+      this.px += this.dashX * 260 * dt
+      this.py += this.dashY * 260 * dt
+      // 冲刺拖尾
+      if (chance(0.7)) this.parts.push({ x: this.px, y: this.py, vx: 0, vy: 0, life: 0.25, maxLife: 0.25, color: '#57c7ff', size: 2 })
+    } else if (this.moving) {
+      this.px += mdx * this.spd * dt
+      this.py += mdy * this.spd * dt
     }
 
     // 回复
     if (this.regen > 0) this.hp = Math.min(this.maxHp, this.hp + this.regen * dt)
 
+    // 击杀里程碑
+    if (this.kills >= this.nextMilestone) {
+      this.float(this.px, this.py - 34, `${this.nextMilestone === 1000 ? '千人斩！！' : this.nextMilestone + ' 击杀！'}`, '#ffd75e')
+      this.burst(this.px, this.py, '#ffd75e', 16)
+      sfx.levelup()
+      this.nextMilestone *= 10
+    }
+
+    this.updateSurge(dt)
     this.updateSpawning(dt)
     this.updateEnemies(dt)
     this.rebuildGrid()
     this.separateEnemies()
     this.updateWeapons(dt)
     this.updateProjs(dt)
+    this.updateEProjs(dt)
     this.updateNovas(dt)
     this.updatePickups(dt)
+    this.updateChests(dt)
     this.updateFx(dt)
     this.checkPlayerHit()
 
     if (this.hp <= 0) this.endRun(false)
+  }
+
+  // ---------- 怪物狂潮事件：每 60 秒一波包围 + 刷怪加速 ----------
+  updateSurge(dt: number) {
+    this.surgeMode = Math.max(0, this.surgeMode - dt)
+    if (this.t >= this.nextSurge) {
+      this.nextSurge += SURGE_INTERVAL
+      this.surgeMode = 6
+      this.float(this.px, this.py - 40, '怪物狂潮！', '#ff4f6b')
+      sfx.boss()
+      // 环形包围一波
+      const ring = 12 + Math.floor(this.t / 30)
+      const kinds: EnemyKind[] = this.t < 120 ? ['slime', 'bat'] : ['slime', 'bat', 'skel']
+      for (let i = 0; i < ring; i++) {
+        const a = (Math.PI * 2 * i) / ring
+        const d = 250
+        this.spawnEnemyAt(pick(kinds), this.px + Math.cos(a) * d, this.py + Math.sin(a) * d)
+      }
+    }
   }
 
   endRun(win: boolean) {
@@ -243,8 +326,8 @@ export class Game {
       sfx.boss()
       this.shake = 1
     }
-    // 普通怪
-    this.spawnT -= dt
+    // 普通怪（狂潮期间刷怪加速）
+    this.spawnT -= dt * (this.surgeMode > 0 ? 2.2 : 1)
     if (this.spawnT <= 0 && this.enemies.length < 220) {
       this.spawnT = clamp(1.15 - this.t * 0.003, 0.22, 1.15)
       const batch = 1 + Math.floor(this.t / 70)
@@ -259,19 +342,26 @@ export class Game {
   }
 
   spawnEnemy(kind: EnemyKind): Enemy {
-    const base = ENEMY_BASE[kind]
     const a = rand(Math.PI * 2)
-    const d = 300
+    return this.spawnEnemyAt(kind, this.px + Math.cos(a) * 300, this.py + Math.sin(a) * 300)
+  }
+
+  spawnEnemyAt(kind: EnemyKind, x: number, y: number): Enemy {
+    const base = ENEMY_BASE[kind]
     const hpScale = kind === 'boss' || kind === 'elite' ? 1 + this.t / 300 : 1 + (this.t / 60) * 0.55
     const dmgScale = 1 + (this.t / 300) * 0.5
     const e: Enemy = {
       id: this.eid++, kind,
-      x: this.px + Math.cos(a) * d,
-      y: this.py + Math.sin(a) * d,
+      x, y,
       hp: base.hp * hpScale, maxHp: base.hp * hpScale,
       spd: base.spd * rand(0.9, 1.1), dmg: base.dmg * dmgScale,
       r: base.r, xp: base.xp, scale: base.scale,
       flash: 0, auraCd: 0, orbCd: 0,
+      burn: 0, burnT: 0,
+      atkT: rand(1.5, 3),
+      dashT: 0, dashCd: rand(1, 2.5),
+      chargeT: 0, chargeCd: rand(2, 4), chargeAng: 0,
+      specialT: rand(2, 4),
     }
     this.enemies.push(e)
     return e
@@ -281,11 +371,109 @@ export class Game {
     for (const e of this.enemies) {
       const dx = this.px - e.x, dy = this.py - e.y
       const d = Math.hypot(dx, dy) || 1
-      e.x += (dx / d) * e.spd * dt
-      e.y += (dy / d) * e.spd * dt
       e.flash = Math.max(0, e.flash - dt)
       e.auraCd = Math.max(0, e.auraCd - dt)
       e.orbCd = Math.max(0, e.orbCd - dt)
+      // 持续燃烧（炼狱余烬）
+      if (e.burn > 0) {
+        e.burnT -= dt
+        if (e.burnT <= 0) {
+          e.burnT = 0.5
+          e.burn--
+          this.damage(e, 5)
+          if (chance(0.5)) this.parts.push({ x: e.x + rand(-4, 4), y: e.y - 4, vx: rand(-8, 8), vy: -20, life: 0.4, maxLife: 0.4, color: '#ff7f3f', size: 1 })
+        }
+      }
+
+      let moveX = dx / d, moveY = dy / d, spd = e.spd
+
+      switch (e.kind) {
+        case 'slime':
+          // 波浪式缓慢逼近
+          moveX += Math.sin(this.frameT * 2 + e.id) * 0.3
+          moveY += Math.cos(this.frameT * 1.7 + e.id) * 0.3
+          break
+        case 'bat': {
+          // 小恶魔：周期性突进
+          e.dashCd -= dt
+          if (e.dashT > 0) {
+            e.dashT -= dt
+            spd = 150
+          } else if (e.dashCd <= 0 && d < 100) {
+            e.dashT = 0.3
+            e.dashCd = 2.6
+          } else {
+            spd = e.spd
+          }
+          break
+        }
+        case 'skel': {
+          // 骷髅：保持距离，远程扔骨头
+          if (d < 130) {
+            e.atkT -= dt
+            if (e.atkT <= 0) {
+              e.atkT = 2.6
+              const sp = 110
+              this.eprojs.push({ x: e.x, y: e.y - 8, vx: (dx / d) * sp, vy: (dy / d) * sp, dmg: e.dmg * 0.6, life: 2.5, r: 3, color: '#e6e6f0' })
+              this.float(e.x, e.y - 14, '扔骨头！', '#a8a8c0')
+            }
+            // 保持 90-130 距离：太近后退
+            if (d < 85) spd = -e.spd * 0.7
+          }
+          break
+        }
+        case 'elite': {
+          // 食人魔：蓄力冲锋
+          e.chargeCd -= dt
+          if (e.chargeT > 0) {
+            e.chargeT -= dt
+            // 蓄力阶段（前 0.6 秒原地预警，之后冲锋）
+            if (e.chargeT < 0.6) {
+              moveX = Math.cos(e.chargeAng); moveY = Math.sin(e.chargeAng)
+              spd = 165
+            } else {
+              spd = 0
+            }
+            if (e.chargeT <= 0) e.chargeCd = 4
+          } else if (e.chargeCd <= 0 && d < 150) {
+            e.chargeT = 0.95
+            e.chargeAng = Math.atan2(dy, dx)
+          }
+          break
+        }
+        case 'boss': {
+          // 大恶魔：弹幕 / 扇形火球 / 召唤
+          e.specialT -= dt
+          if (e.specialT <= 0) {
+            e.specialT = 3.2
+            const move = Math.floor(rand(0, 3))
+            if (move === 0) {
+              // 弹幕：12 向火球
+              for (let i = 0; i < 12; i++) {
+                const a = (Math.PI * 2 * i) / 12
+                this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 80, vy: Math.sin(a) * 80, dmg: 12, life: 3, r: 3, color: '#ff7f3f' })
+              }
+              sfx.zap()
+            } else if (move === 1) {
+              // 扇形火球
+              const base = Math.atan2(dy, dx)
+              for (let i = -2; i <= 2; i++) {
+                const a = base + i * 0.28
+                this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 120, vy: Math.sin(a) * 120, dmg: 16, life: 2.2, r: 4, color: '#ff4f6b' })
+              }
+              sfx.zap()
+            } else {
+              // 召唤小怪
+              for (let i = 0; i < 3; i++) this.spawnEnemyAt(pick(['slime', 'bat']), e.x + rand(-30, 30), e.y + rand(-30, 30))
+              this.float(e.x, e.y - 20, '召唤！', '#b13e53')
+            }
+          }
+          break
+        }
+      }
+
+      e.x += moveX * spd * dt
+      e.y += moveY * spd * dt
     }
   }
 
@@ -337,10 +525,10 @@ export class Game {
     for (const w of this.weapons) {
       if (w.id === 'orb') {
         // w.t 作为旋转角度累加器
-        w.t += dt * (2.2 + 0.15 * w.lv)
-        const count = 1 + w.lv
-        const radius = 30 + w.lv * 2
-        const dmg = (6 + 3 * w.lv) * this.dmgMul
+        w.t += dt * (2.2 + 0.15 * w.lv) * (w.evolved ? 1.4 : 1)
+        const count = w.evolved ? 6 + w.lv : 1 + w.lv
+        const radius = (30 + w.lv * 2) * (w.evolved ? 1.35 : 1)
+        const dmg = (6 + 3 * w.lv) * this.dmgMul * (w.evolved ? 1.7 : 1)
         for (let i = 0; i < count; i++) {
           const a = w.t + (Math.PI * 2 * i) / count
           const ox = this.px + Math.cos(a) * radius
@@ -355,12 +543,13 @@ export class Game {
         continue
       }
       if (w.id === 'aura') {
-        const radius = 24 + 5 * w.lv
-        const dmg = (4 + 2.5 * w.lv) * this.dmgMul
+        const radius = (24 + 5 * w.lv) * (w.evolved ? 1.5 : 1)
+        const dmg = (4 + 2.5 * w.lv) * this.dmgMul * (w.evolved ? 1.6 : 1)
         this.forEachNear(this.px, this.py, radius + 12, e => {
           if (e.auraCd <= 0 && dist2(this.px, this.py, e.x, e.y) < (radius + e.r) ** 2) {
             e.auraCd = 0.35
             this.damage(e, dmg)
+            if (w.evolved) { e.burn = 3; e.burnT = 0 } // 炼狱：留下持续燃烧
           }
         })
         continue
@@ -368,28 +557,39 @@ export class Game {
       w.t -= dt
       if (w.t > 0) continue
       if (w.id === 'knife') {
-        w.t = 0.85 * this.cdMul
-        const count = [1, 2, 2, 3, 4][w.lv - 1]
-        const dmg = (8 + 3 * (w.lv - 1)) * this.dmgMul
-        const target = this.nearestEnemy(280)
-        const baseA = target ? Math.atan2(target.y - this.py, target.x - this.px) : (this.face > 0 ? 0 : Math.PI)
-        for (let i = 0; i < count; i++) {
-          const a = baseA + (i - (count - 1) / 2) * 0.16
-          this.projs.push({
-            x: this.px, y: this.py,
-            vx: Math.cos(a) * 260, vy: Math.sin(a) * 260,
-            dmg, life: 1.3, pierce: w.lv >= 4 ? 2 : 1, angle: a,
-          })
+        w.t = 0.85 * this.cdMul * (w.evolved ? 0.7 : 1)
+        const dmg = (8 + 3 * (w.lv - 1)) * this.dmgMul * (w.evolved ? 1.5 : 1)
+        if (w.evolved) {
+          // 千刃风暴：八方齐射
+          for (let i = 0; i < 10; i++) {
+            const a = (Math.PI * 2 * i) / 10 + rand(-0.1, 0.1)
+            this.projs.push({ x: this.px, y: this.py, vx: Math.cos(a) * 270, vy: Math.sin(a) * 270, dmg, life: 1.2, pierce: 3, angle: a })
+          }
+        } else {
+          const count = [1, 2, 2, 3, 4][w.lv - 1]
+          const target = this.nearestEnemy(280)
+          const baseA = target ? Math.atan2(target.y - this.py, target.x - this.px) : (this.face > 0 ? 0 : Math.PI)
+          for (let i = 0; i < count; i++) {
+            const a = baseA + (i - (count - 1) / 2) * 0.16
+            this.projs.push({
+              x: this.px, y: this.py,
+              vx: Math.cos(a) * 260, vy: Math.sin(a) * 260,
+              dmg, life: 1.3, pierce: w.lv >= 4 ? 2 : 1, angle: a,
+            })
+          }
         }
         sfx.shoot()
       } else if (w.id === 'nova') {
-        w.t = 3.4 * this.cdMul
-        this.novas.push({ x: this.px, y: this.py, r: 8, maxR: 58 + 11 * w.lv, dmg: (10 + 6 * w.lv) * this.dmgMul, hit: new Set() })
+        w.t = 3.4 * this.cdMul * (w.evolved ? 0.75 : 1)
+        const maxR = (58 + 11 * w.lv) * (w.evolved ? 1.7 : 1)
+        const dmg = (10 + 6 * w.lv) * this.dmgMul * (w.evolved ? 1.8 : 1)
+        this.novas.push({ x: this.px, y: this.py, r: 8, maxR, dmg, hit: new Set() })
+        if (w.evolved) this.novas.push({ x: this.px, y: this.py, r: 2, maxR: maxR * 0.6, dmg: dmg * 0.7, hit: new Set() })
         sfx.nova()
       } else if (w.id === 'bolt') {
-        w.t = 2.3 * this.cdMul
-        const n = 1 + Math.floor((w.lv - 1) / 2)
-        const dmg = (16 + 8 * w.lv) * this.dmgMul
+        w.t = 2.3 * this.cdMul * (w.evolved ? 0.65 : 1)
+        const n = w.evolved ? 7 : 1 + Math.floor((w.lv - 1) / 2)
+        const dmg = (16 + 8 * w.lv) * this.dmgMul * (w.evolved ? 1.4 : 1)
         const inRange = this.enemies.filter(e => !e.dead && dist2(e.x, e.y, this.px, this.py) < 220 * 220)
         for (let i = 0; i < n && inRange.length > 0; i++) {
           const e = pick(inRange)
@@ -441,6 +641,25 @@ export class Game {
     this.projs = this.projs.filter(p => p.life > 0)
   }
 
+  // ---------- 敌方弹体（骷髅骨头 / Boss 火球） ----------
+  updateEProjs(dt: number) {
+    for (const p of this.eprojs) {
+      p.x += p.vx * dt
+      p.y += p.vy * dt
+      p.life -= dt
+      if (p.life <= 0) continue
+      if (this.invuln <= 0 && dist2(p.x, p.y, this.px, this.py) < (p.r + 5) ** 2) {
+        p.life = 0
+        this.hp -= p.dmg
+        this.invuln = 0.5
+        this.shake = 0.4
+        sfx.hurt()
+        this.float(this.px, this.py - 12, `-${Math.round(p.dmg)}`, '#ff4f6b')
+      }
+    }
+    this.eprojs = this.eprojs.filter(p => p.life > 0)
+  }
+
   updateNovas(dt: number) {
     for (const n of this.novas) {
       n.r += 150 * dt
@@ -487,6 +706,7 @@ export class Game {
       sfx.boom()
       for (let i = 0; i < 5; i++) this.gems.push({ x: e.x + rand(-12, 12), y: e.y + rand(-12, 12), val: 4, vx: 0, vy: 0 })
       this.hearts.push({ x: e.x, y: e.y })
+      this.chests.push({ x: e.x + 14, y: e.y, opened: 0 }) // 精英掉宝箱
     } else {
       this.gems.push({ x: e.x, y: e.y, val: e.xp, vx: 0, vy: 0 })
       if (chance(e.kind === 'skel' ? 0.05 : 0.02)) this.hearts.push({ x: e.x, y: e.y })
@@ -541,6 +761,21 @@ export class Game {
     this.hearts = this.hearts.filter(h => !(h as any).got)
   }
 
+  // ---------- 宝箱：走上去开箱，送一次免费强化 ----------
+  updateChests(dt: number) {
+    for (const c of this.chests) {
+      if (c.opened) continue
+      if (dist2(c.x, c.y, this.px, this.py) < 14 * 14) {
+        c.opened = 1 // 触发动画
+        this.pendingLv++
+        sfx.levelup()
+        this.burst(c.x, c.y, '#ffd75e', 14)
+        if (this.state === 'play') this.openLevelUp()
+      }
+    }
+    for (const c of this.chests) if (c.opened > 0 && c.opened < 1) c.opened = Math.min(1, c.opened + dt * 4)
+  }
+
   gainXp(v: number) {
     this.xp += v * this.xpMul
     sfx.pickup()
@@ -559,8 +794,9 @@ export class Game {
     for (const def of UPG) {
       if (def.type === 'weapon') {
         const ws = this.weapons.find(w => w.id === def.id)
-        if (ws) { if (ws.lv < def.maxLv) pool.push({ def, lv: ws.lv + 1 }) }
-        else if (this.weapons.length < 4) pool.push({ def, lv: 1 })
+        if (ws) {
+          if (ws.lv < def.maxLv) pool.push({ def, lv: ws.lv + 1 })
+        } else if (this.weapons.length < 4) pool.push({ def, lv: 1 })
       } else {
         const l = this.passives[def.id] || 0
         if (l < def.maxLv) pool.push({ def, lv: l + 1 })
@@ -570,6 +806,12 @@ export class Game {
     while (this.choices.length < 3) this.choices.push({ def: SNACK, lv: 1 })
     this.state = 'levelup'
     sfx.levelup()
+  }
+
+  // 武器满级 + 对应被动 → 可进化
+  evolvable(w: WeaponState): boolean {
+    const evo = EVO[w.id]
+    return !!evo && w.lv >= 5 && !w.evolved && (this.passives[evo.need] || 0) >= 1
   }
 
   updateLevelUp() {
@@ -593,18 +835,35 @@ export class Game {
     const { def } = c
     if (def.type === 'weapon') {
       const ws = this.weapons.find(w => w.id === def.id)
-      if (ws) ws.lv = c.lv
-      else this.weapons.push({ id: def.id, lv: 1, t: 0 })
+      if (ws) {
+        ws.lv = c.lv
+        if (this.evolvable(ws)) this.evolve(ws)
+      } else {
+        const nw: WeaponState = { id: def.id, lv: 1, t: 0, evolved: false }
+        this.weapons.push(nw)
+        if (this.evolvable(nw)) this.evolve(nw)
+      }
     } else if (def.type === 'passive') {
       this.passives[def.id] = c.lv
       if (def.id === 'vital') {
         this.maxHp += 25
         this.hp = Math.min(this.maxHp, this.hp + 25)
       }
+      // 新增被动可能让满级武器解锁进化
+      for (const w of this.weapons) if (this.evolvable(w)) this.evolve(w)
     } else {
       this.hp = Math.min(this.maxHp, this.hp + 40)
       sfx.heal()
     }
+  }
+
+  evolve(w: WeaponState) {
+    w.evolved = true
+    const evo = EVO[w.id]
+    this.float(this.px, this.py - 36, `武器进化：${evo.name}！`, '#ffd75e')
+    this.burst(this.px, this.py, '#ffd75e', 24)
+    sfx.win()
+    this.shake = 0.6
   }
 
   cardRects(): { x: number; y: number; w: number; h: number }[] {
@@ -668,15 +927,38 @@ export class Game {
     const W = (wx: number) => wx - cx
     const H = (wy: number) => wy - cy
 
-    // 灼热光环（在敌人下层）
+    // 灼热光环 / 炼狱（在敌人下层）
     const aura = this.weapons.find(w => w.id === 'aura')
     if (aura) {
-      const r = 24 + 5 * aura.lv
-      g.fillStyle = 'rgba(255,127,63,0.10)'
+      const r = (24 + 5 * aura.lv) * (aura.evolved ? 1.5 : 1)
+      const col = aura.evolved ? 'rgba(255,90,40,' : 'rgba(255,127,63,'
+      g.fillStyle = col + '0.10)'
       g.beginPath(); g.arc(W(this.px), H(this.py), r, 0, Math.PI * 2); g.fill()
-      g.strokeStyle = 'rgba(255,127,63,0.35)'
+      g.strokeStyle = col + '0.4)'
       g.lineWidth = 1
       g.beginPath(); g.arc(W(this.px), H(this.py), r, 0, Math.PI * 2); g.stroke()
+      if (aura.evolved) {
+        // 炼狱火焰粒子
+        if (chance(0.5)) {
+          const a = rand(Math.PI * 2)
+          this.parts.push({ x: this.px + Math.cos(a) * r * 0.9, y: this.py + Math.sin(a) * r * 0.9, vx: rand(-6, 6), vy: -24, life: 0.5, maxLife: 0.5, color: '#ff6b35', size: 1 })
+        }
+      }
+    }
+
+    // 宝箱
+    for (const c of this.chests) {
+      const cf = c.opened >= 1 ? 2 : c.opened > 0 ? 1 : 0
+      const img = frame('chest', cf) as CanvasImageSource
+      const cb = c.opened ? 0 : Math.sin(this.frameT * 4 + c.x) * 1.5
+      this.shadow(W(c.x), H(c.y) + 6, 6)
+      g.drawImage(img, Math.round(W(c.x) - 8), Math.round(H(c.y) - 8 + cb))
+      if (!c.opened) {
+        this.g.textAlign = 'center'
+        this.g.font = '7px monospace'
+        this.g.fillStyle = '#ffd75e'
+        if (Math.floor(this.frameT * 2) % 2 === 0) this.g.fillText('宝箱！', Math.round(W(c.x)), Math.round(H(c.y) - 14))
+      }
     }
 
     // 掉落物：金币（4 帧旋转）+ 红药水
@@ -703,6 +985,19 @@ export class Game {
       if (e.flash > 0) g.filter = 'brightness(3)'
       g.drawImage(img, Math.round(W(e.x) - iw / 2), Math.round(H(e.y) - ih / 2), iw, ih)
       g.filter = 'none'
+      // 燃烧标记
+      if (e.burn > 0 && Math.floor(this.frameT * 8) % 2 === 0) {
+        g.fillStyle = '#ff7f3f'
+        g.font = '7px monospace'
+        g.textAlign = 'center'
+        g.fillText('🔥', Math.round(W(e.x)), Math.round(H(e.y) - ih / 2 - 3))
+      }
+      // 精英蓄力预警圈
+      if (e.kind === 'elite' && e.chargeT > 0.35) {
+        g.strokeStyle = 'rgba(255,90,40,0.7)'
+        g.lineWidth = 2
+        g.beginPath(); g.arc(W(e.x), H(e.y), e.r * e.scale + 4, 0, Math.PI * 2); g.stroke()
+      }
       // 精英/Boss 血条
       if (e.kind === 'elite' || e.kind === 'boss') {
         const bw = e.kind === 'boss' ? 40 : 24
@@ -714,14 +1009,25 @@ export class Game {
       }
     }
 
-    // 玩家（idle/run 各 4 帧，受击闪烁）
+    // 敌方弹体（骨头 / 火球）
+    for (const p of this.eprojs) {
+      g.fillStyle = p.color
+      g.beginPath()
+      g.arc(Math.round(W(p.x)), Math.round(W(p.y)), p.r, 0, Math.PI * 2)
+      g.fill()
+      g.strokeStyle = 'rgba(0,0,0,0.3)'
+      g.stroke()
+    }
+
+    // 玩家（idle/run 各 4 帧，受击闪烁；冲刺时拉伸）
     const blink = this.invuln > 0 && Math.floor(this.frameT * 12) % 2 === 0
     if (!blink) {
-      const key = this.moving ? 'player_run' : 'player_idle'
-      const pf = Math.floor(this.frameT * (this.moving ? 10 : 5)) % 4
+      const key = this.moving || this.dashT > 0 ? 'player_run' : 'player_idle'
+      const pf = Math.floor(this.frameT * (this.moving || this.dashT > 0 ? 12 : 5)) % 4
       const pimg = frame(key, pf, this.face < 0) as CanvasImageSource
       this.shadow(W(this.px), H(this.py) + 13, 6)
-      if (this.invuln > 0) g.filter = 'brightness(1.6)'
+      if (this.invuln > 0 && this.dashT <= 0) g.filter = 'brightness(1.6)'
+      if (this.dashT > 0) g.filter = 'brightness(1.4) saturate(1.6)'
       g.drawImage(pimg, Math.round(W(this.px) - 8), Math.round(H(this.py) - 14))
       g.filter = 'none'
     }
@@ -872,8 +1178,41 @@ export class Game {
       g.textAlign = 'center'
       g.fillStyle = `rgba(255,255,255,${clamp(8 - this.t, 0, 1) * 0.8})`
       g.font = '9px monospace'
-      g.fillText('WASD / 方向键 移动 · 武器自动攻击 · 坚持 5 分钟！', VW / 2, VH - 28)
+      g.fillText('WASD 移动 · Space/Shift 冲刺 · 坚持 5 分钟！', VW / 2, VH - 28)
     }
+    // 武器栏（左上角，已进化高亮）
+    let wx = 4
+    const wy = 20
+    for (const w of this.weapons) {
+      const def = UPG.find(u => u.id === w.id)
+      const icon = SPR[def?.icon || 'knife']
+      g.fillStyle = w.evolved ? 'rgba(255,215,94,0.25)' : 'rgba(23,26,46,0.8)'
+      g.fillRect(wx, wy, 16, 16)
+      g.strokeStyle = w.evolved ? '#ffd75e' : '#3a3f66'
+      g.strokeRect(wx + 0.5, wy + 0.5, 15, 15)
+      const isc = 1.6
+      g.drawImage(icon, wx + 2, wy + 2, icon.width * isc, icon.height * isc)
+      g.font = '6px monospace'
+      g.textAlign = 'right'
+      g.fillStyle = '#ffffff'
+      g.fillText(w.evolved ? 'E' : String(w.lv), wx + 15, wy + 15)
+      wx += 19
+    }
+    // 冲刺冷却（HP 条上方小条）
+    const dcw = 30
+    g.fillStyle = '#171a2e'
+    g.fillRect(4, VH - 20, dcw, 4)
+    if (this.dashCd <= 0) {
+      g.fillStyle = '#57c7ff'
+      g.fillRect(4, VH - 20, dcw, 4)
+    } else {
+      g.fillStyle = '#3a3f66'
+      g.fillRect(4, VH - 20, dcw * (1 - this.dashCd / 2.2), 4)
+    }
+    g.textAlign = 'left'
+    g.font = '6px monospace'
+    g.fillStyle = '#9aa4c8'
+    g.fillText('冲刺', 4 + dcw + 4, VH - 16)
     // 静音标记
     if (isMuted()) {
       g.textAlign = 'right'
@@ -919,6 +1258,23 @@ export class Game {
       // 描述换行
       g.fillStyle = '#9aa4c8'
       this.wrapText(c.def.desc, r.x + r.w / 2, r.y + 88, r.w - 14, 11)
+      // 进化配方提示（满级武器或对应被动时显示）
+      if (c.def.type === 'weapon' && EVO[c.def.id]) {
+        const needDef = UPG.find(u => u.id === EVO[c.def.id].need)
+        const have = (this.passives[EVO[c.def.id].need] || 0) >= 1
+        g.font = '7px monospace'
+        g.fillStyle = have ? '#57e6a0' : '#8a6d3b'
+        g.fillText(`进化：满级+${needDef?.name}`, r.x + r.w / 2, r.y + r.h - 20)
+      } else if (c.def.type === 'passive') {
+        // 该被动是哪些武器的进化条件
+        const unlocks = Object.entries(EVO).filter(([, v]) => v.need === c.def.id).map(([k]) => UPG.find(u => u.id === k)?.name)
+        if (unlocks.length) {
+          g.font = '7px monospace'
+          g.fillStyle = '#8a6d3b'
+          g.fillText(`进化条件：${unlocks.join('/')}`, r.x + r.w / 2, r.y + r.h - 20)
+        }
+      }
+      g.font = '8px monospace'
       g.fillStyle = '#5c6285'
       g.fillText(`[ ${i + 1} ]`, r.x + r.w / 2, r.y + r.h - 8)
     })
@@ -969,12 +1325,17 @@ export class Game {
     }
     g.font = '10px monospace'
     g.fillStyle = '#ffffff'
-    g.fillText(`存活时间  ${fmtTime(this.t)}`, VW / 2, 130)
-    g.fillText(`击杀数    ${this.kills}`, VW / 2, 148)
-    g.fillText(`等级      Lv ${this.level}`, VW / 2, 166)
+    g.fillText(`存活时间  ${fmtTime(this.t)}`, VW / 2, 128)
+    g.fillText(`击杀数    ${this.kills}`, VW / 2, 145)
+    g.fillText(`等级      Lv ${this.level}`, VW / 2, 162)
+    const evoCount = this.weapons.filter(w => w.evolved).length
+    if (evoCount > 0) {
+      g.fillStyle = '#ffd75e'
+      g.fillText(`武器进化  ${evoCount} 件`, VW / 2, 179)
+    }
     if (this.newRecord) {
       g.fillStyle = '#57e6a0'
-      g.fillText('★ 新纪录！', VW / 2, 188)
+      g.fillText('★ 新纪录！', VW / 2, 197)
     }
     g.fillStyle = '#9aa4c8'
     g.font = '9px monospace'
@@ -1034,7 +1395,7 @@ export class Game {
     }
     g.font = '8px monospace'
     g.fillStyle = '#5c6285'
-    g.fillText('WASD 移动 · 武器自动攻击 · 升级三选一 · 坚持 5 分钟', VW / 2, 242)
-    g.fillText('P 暂停 · M 静音', VW / 2, 255)
+    g.fillText('WASD 移动 · 武器自动攻击 · Space/Shift 冲刺 · 升级三选一', VW / 2, 242)
+    g.fillText('坚持 5 分钟 · P 暂停 · M 静音', VW / 2, 255)
   }
 }

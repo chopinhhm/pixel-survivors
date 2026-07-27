@@ -40,6 +40,7 @@ loadAssets().then(start).catch(err => {
 
 function start() {
   const game = new Game()
+  ;(window as any).__game = game // 调试钩子
   let last = performance.now()
   function frame(now: number) {
     const dt = Math.min(0.05, (now - last) / 1000)
