@@ -24,7 +24,7 @@ interface Enemy {
   hp: number; maxHp: number
   spd: number; dmg: number; r: number; xp: number
   flash: number; auraCd: number; orbCd: number
-  scale: number
+  scale: number; spawnScale: number; deathT: number
   burn: number; burnT: number // 炼狱光环的持续燃烧
   atkT: number // 远程攻击冷却（骷髅）
   dashT: number; dashCd: number; dashDx: number; dashDy: number // 小恶魔突进方向
@@ -106,6 +106,7 @@ export class Game {
   frameT = 0
 
   px = 0; py = 0
+  camX = 0; camY = 0
   hp = 100; maxHp = 100
   invuln = 0
   face = 1
@@ -163,6 +164,7 @@ export class Game {
   reset() {
     this.t = 0; this.kills = 0; this.shake = 0
     this.px = 0; this.py = 0
+    this.camX = 0; this.camY = 0
     this.maxHp = 100; this.hp = 100; this.invuln = 0
     this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0
     this.level = 1; this.xp = 0; this.xpNext = 8; this.pendingLv = 0
@@ -249,6 +251,11 @@ export class Game {
       this.py += mdy * this.spd * dt
     }
 
+    // 相机平滑 + 动向引导
+    const lead = 18
+    this.camX += (this.px + mdx * lead - this.camX) * 0.12
+    this.camY += (this.py + mdy * lead - this.camY) * 0.12
+
     // 回复
     if (this.regen > 0) this.hp = Math.min(this.maxHp, this.hp + this.regen * dt)
 
@@ -256,6 +263,8 @@ export class Game {
     if (this.kills >= this.nextMilestone) {
       this.float(this.px, this.py - 34, `${this.nextMilestone === 1000 ? '千人斩！！' : this.nextMilestone + ' 击杀！'}`, '#ffd75e')
       this.burst(this.px, this.py, '#ffd75e', 16)
+      this.chests.push({ x: this.px + rand(-20, 20), y: this.py + rand(-20, 20), opened: 0 })
+      this.float(this.px, this.py - 46, '奖励宝箱！', '#ffd75e')
       sfx.levelup()
       this.nextMilestone *= 10
     }
@@ -355,7 +364,7 @@ export class Game {
       x, y,
       hp: base.hp * hpScale, maxHp: base.hp * hpScale,
       spd: base.spd * rand(0.9, 1.1), dmg: base.dmg * dmgScale,
-      r: base.r, xp: base.xp, scale: base.scale,
+      r: base.r, xp: base.xp, scale: base.scale, spawnScale: 0, deathT: 0,
       flash: 0, auraCd: 0, orbCd: 0,
       burn: 0, burnT: 0,
       atkT: rand(1.5, 3),
@@ -369,6 +378,13 @@ export class Game {
 
   updateEnemies(dt: number) {
     for (const e of this.enemies) {
+      // 出生动画
+      if (e.spawnScale < 1) e.spawnScale = Math.min(1, e.spawnScale + dt * 4)
+      // 死亡淡出
+      if (e.dead) {
+        e.deathT -= dt
+        continue
+      }
       const dx = this.px - e.x, dy = this.py - e.y
       const d = Math.hypot(dx, dy) || 1
       e.flash = Math.max(0, e.flash - dt)
@@ -494,6 +510,7 @@ export class Game {
       e.x += moveX * spd * dt
       e.y += moveY * spd * dt
     }
+    this.enemies = this.enemies.filter(e => !e.dead || e.deathT > 0)
   }
 
   // ---------- 空间网格（碰撞查询 + 分离） ----------
@@ -501,6 +518,7 @@ export class Game {
     this.grid.clear()
     const cs = 24
     for (const e of this.enemies) {
+      if (e.dead) continue
       const key = `${Math.floor(e.x / cs)},${Math.floor(e.y / cs)}`
       let cell = this.grid.get(key)
       if (!cell) { cell = []; this.grid.set(key, cell) }
@@ -648,10 +666,16 @@ export class Game {
       p.life -= dt
       if (p.life <= 0) continue
       this.forEachNear(p.x, p.y, 10, e => {
-        if (p.pierce <= 0) return
+        if (p.pierce <= 0 || e.dead) return
         if (dist2(p.x, p.y, e.x, e.y) < (4 + e.r) ** 2) {
           p.pierce--
           this.damage(e, p.dmg)
+          if (!e.dead) {
+            const kb = e.kind === 'boss' ? 1 : e.kind === 'elite' ? 3 : 6
+            const ang = Math.atan2(e.y - p.y, e.x - p.x)
+            e.x += Math.cos(ang) * kb
+            e.y += Math.sin(ang) * kb
+          }
           if (chance(0.35)) sfx.hit()
         }
       })
@@ -709,10 +733,13 @@ export class Game {
   }
 
   kill(e: Enemy) {
+    if (e.dead) return
     e.dead = true
+    e.deathT = 0.18
+    e.flash = 0.12
     this.kills++
     const colors: Record<EnemyKind, string> = { slime: '#5ac54f', bat: '#7b5be0', skel: '#e6e6f0', elite: '#e05a4f', boss: '#b13e53' }
-    this.burst(e.x, e.y, colors[e.kind], e.kind === 'boss' ? 40 : e.kind === 'elite' ? 18 : 7)
+    this.burst(e.x, e.y, colors[e.kind], e.kind === 'boss' ? 45 : e.kind === 'elite' ? 22 : 9)
     // 掉落
     if (e.kind === 'boss') {
       sfx.boom()
@@ -723,6 +750,7 @@ export class Game {
       this.boss = null
     } else if (e.kind === 'elite') {
       sfx.boom()
+      this.shake = 0.45
       for (let i = 0; i < 5; i++) this.gems.push({ x: e.x + rand(-12, 12), y: e.y + rand(-12, 12), val: 4, vx: 0, vy: 0 })
       this.hearts.push({ x: e.x, y: e.y })
       this.chests.push({ x: e.x + 14, y: e.y, opened: 0 }) // 精英掉宝箱
@@ -730,7 +758,6 @@ export class Game {
       this.gems.push({ x: e.x, y: e.y, val: e.xp, vx: 0, vy: 0 })
       if (chance(e.kind === 'skel' ? 0.05 : 0.02)) this.hearts.push({ x: e.x, y: e.y })
     }
-    this.enemies = this.enemies.filter(o => o !== e)
   }
 
   checkPlayerHit() {
@@ -938,8 +965,8 @@ export class Game {
     // 相机（含震动）
     const sx = this.shake > 0 ? rand(-3, 3) * this.shake : 0
     const sy = this.shake > 0 ? rand(-3, 3) * this.shake : 0
-    const cx = this.px - VW / 2 + sx
-    const cy = this.py - VH / 2 + sy
+    const cx = this.camX - VW / 2 + sx
+    const cy = this.camY - VH / 2 + sy
 
     this.drawGround(cx, cy)
 
@@ -996,35 +1023,39 @@ export class Game {
     for (const e of this.enemies) {
       const af = Math.floor(this.frameT * 8 + e.id) % 4
       const faceLeft = this.px < e.x
-      const scale = ENEMY_DRAW_SCALE[e.kind] ?? 1
+      const baseScale = ENEMY_DRAW_SCALE[e.kind] ?? 1
+      const drawScale = baseScale * e.spawnScale * (e.dead ? Math.max(0, e.deathT / 0.18) : 1)
       const img = frame(e.kind, af, faceLeft) as CanvasImageSource
-      const iw = (img as any).width * scale
-      const ih = (img as any).height * scale
+      const iw = (img as any).width * drawScale
+      const ih = (img as any).height * drawScale
       this.shadow(W(e.x), H(e.y) + ih / 2 - 2, iw * 0.35)
-      if (e.flash > 0) g.filter = 'brightness(3)'
+      if (e.dead) g.filter = 'brightness(5) saturate(0)'
+      else if (e.flash > 0) g.filter = 'brightness(4) saturate(0.5)'
       g.drawImage(img, Math.round(W(e.x) - iw / 2), Math.round(H(e.y) - ih / 2), iw, ih)
       g.filter = 'none'
-      // 燃烧标记
-      if (e.burn > 0 && Math.floor(this.frameT * 8) % 2 === 0) {
-        g.fillStyle = '#ff7f3f'
-        g.font = '7px monospace'
-        g.textAlign = 'center'
-        g.fillText('🔥', Math.round(W(e.x)), Math.round(H(e.y) - ih / 2 - 3))
-      }
-      // 精英/Boss 蓄力预警圈
-      if ((e.kind === 'elite' || e.kind === 'boss') && e.chargeT > 0.35) {
-        g.strokeStyle = e.kind === 'boss' ? 'rgba(255,60,60,0.85)' : 'rgba(255,90,40,0.7)'
-        g.lineWidth = e.kind === 'boss' ? 3 : 2
-        g.beginPath(); g.arc(W(e.x), H(e.y), e.r * e.scale + 4 + (e.kind === 'boss' ? 4 : 0), 0, Math.PI * 2); g.stroke()
-      }
-      // 精英/Boss 血条
-      if (e.kind === 'elite' || e.kind === 'boss') {
-        const bw = e.kind === 'boss' ? 40 : 24
-        const by = H(e.y) - ih / 2 - 5
-        g.fillStyle = '#26233a'
-        g.fillRect(W(e.x) - bw / 2, by, bw, 3)
-        g.fillStyle = '#ff4f6b'
-        g.fillRect(W(e.x) - bw / 2, by, bw * clamp(e.hp / e.maxHp, 0, 1), 3)
+      if (!e.dead) {
+        // 燃烧标记
+        if (e.burn > 0 && Math.floor(this.frameT * 8) % 2 === 0) {
+          g.fillStyle = '#ff7f3f'
+          g.font = '7px monospace'
+          g.textAlign = 'center'
+          g.fillText('🔥', Math.round(W(e.x)), Math.round(H(e.y) - ih / 2 - 3))
+        }
+        // 精英/Boss 蓄力预警圈
+        if ((e.kind === 'elite' || e.kind === 'boss') && e.chargeT > 0.35) {
+          g.strokeStyle = e.kind === 'boss' ? 'rgba(255,60,60,0.85)' : 'rgba(255,90,40,0.7)'
+          g.lineWidth = e.kind === 'boss' ? 3 : 2
+          g.beginPath(); g.arc(W(e.x), H(e.y), e.r * e.scale + 4 + (e.kind === 'boss' ? 4 : 0), 0, Math.PI * 2); g.stroke()
+        }
+        // 精英/Boss 血条
+        if (e.kind === 'elite' || e.kind === 'boss') {
+          const bw = e.kind === 'boss' ? 40 : 24
+          const by = H(e.y) - ih / 2 - 5
+          g.fillStyle = '#26233a'
+          g.fillRect(W(e.x) - bw / 2, by, bw, 3)
+          g.fillStyle = '#ff4f6b'
+          g.fillRect(W(e.x) - bw / 2, by, bw * clamp(e.hp / e.maxHp, 0, 1), 3)
+        }
       }
     }
 
