@@ -27,7 +27,7 @@ interface Enemy {
   scale: number
   burn: number; burnT: number // 炼狱光环的持续燃烧
   atkT: number // 远程攻击冷却（骷髅）
-  dashT: number; dashCd: number // 小恶魔突进
+  dashT: number; dashCd: number; dashDx: number; dashDy: number // 小恶魔突进方向
   chargeT: number; chargeCd: number; chargeAng: number // 精英/Boss 冲锋
   specialT: number // Boss 招式计时
   dead?: boolean
@@ -359,7 +359,7 @@ export class Game {
       flash: 0, auraCd: 0, orbCd: 0,
       burn: 0, burnT: 0,
       atkT: rand(1.5, 3),
-      dashT: 0, dashCd: rand(1, 2.5),
+      dashT: 0, dashCd: rand(1, 2.5), dashDx: 0, dashDy: 0,
       chargeT: 0, chargeCd: rand(2, 4), chargeAng: 0,
       specialT: rand(2, 4),
     }
@@ -394,16 +394,19 @@ export class Game {
           moveY += Math.cos(this.frameT * 1.7 + e.id) * 0.3
           break
         case 'bat': {
-          // 小恶魔：周期性突进
+          // 小恶魔：周期性朝玩家方向突进（方向锁定）
           e.dashCd -= dt
           if (e.dashT > 0) {
             e.dashT -= dt
-            spd = 150
-          } else if (e.dashCd <= 0 && d < 100) {
-            e.dashT = 0.3
-            e.dashCd = 2.6
-          } else {
-            spd = e.spd
+            moveX = e.dashDx
+            moveY = e.dashDy
+            spd = 170
+          } else if (e.dashCd <= 0 && d < 120) {
+            e.dashT = 0.28
+            e.dashCd = rand(2.2, 3.2)
+            const ang = Math.atan2(dy, dx)
+            e.dashDx = Math.cos(ang)
+            e.dashDy = Math.sin(ang)
           }
           break
         }
@@ -442,30 +445,46 @@ export class Game {
           break
         }
         case 'boss': {
-          // 大恶魔：弹幕 / 扇形火球 / 召唤
-          e.specialT -= dt
-          if (e.specialT <= 0) {
-            e.specialT = 3.2
-            const move = Math.floor(rand(0, 3))
-            if (move === 0) {
-              // 弹幕：12 向火球
-              for (let i = 0; i < 12; i++) {
-                const a = (Math.PI * 2 * i) / 12
-                this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 80, vy: Math.sin(a) * 80, dmg: 12, life: 3, r: 3, color: '#ff7f3f' })
-              }
-              sfx.zap()
-            } else if (move === 1) {
-              // 扇形火球
-              const base = Math.atan2(dy, dx)
-              for (let i = -2; i <= 2; i++) {
-                const a = base + i * 0.28
-                this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 120, vy: Math.sin(a) * 120, dmg: 16, life: 2.2, r: 4, color: '#ff4f6b' })
-              }
-              sfx.zap()
+          // 大恶魔：弹幕 / 扇形火球 / 召唤 + 蓄力冲锋
+          e.chargeCd -= dt
+          if (e.chargeT > 0) {
+            e.chargeT -= dt
+            if (e.chargeT < 0.8) {
+              moveX = Math.cos(e.chargeAng)
+              moveY = Math.sin(e.chargeAng)
+              spd = 145
             } else {
-              // 召唤小怪
-              for (let i = 0; i < 3; i++) this.spawnEnemyAt(pick(['slime', 'bat']), e.x + rand(-30, 30), e.y + rand(-30, 30))
-              this.float(e.x, e.y - 20, '召唤！', '#b13e53')
+              spd = 0 // 预警原地
+            }
+            if (e.chargeT <= 0) e.chargeCd = 5
+          } else if (e.chargeCd <= 0 && d < 180) {
+            e.chargeT = 1.25
+            e.chargeAng = Math.atan2(dy, dx)
+          } else {
+            e.specialT -= dt
+            if (e.specialT <= 0) {
+              e.specialT = 3.2
+              const move = Math.floor(rand(0, 3))
+              if (move === 0) {
+                // 弹幕：12 向火球
+                for (let i = 0; i < 12; i++) {
+                  const a = (Math.PI * 2 * i) / 12
+                  this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 80, vy: Math.sin(a) * 80, dmg: 12, life: 3, r: 3, color: '#ff7f3f' })
+                }
+                sfx.zap()
+              } else if (move === 1) {
+                // 扇形火球
+                const base = Math.atan2(dy, dx)
+                for (let i = -2; i <= 2; i++) {
+                  const a = base + i * 0.28
+                  this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 120, vy: Math.sin(a) * 120, dmg: 16, life: 2.2, r: 4, color: '#ff4f6b' })
+                }
+                sfx.zap()
+              } else {
+                // 召唤小怪
+                for (let i = 0; i < 3; i++) this.spawnEnemyAt(pick(['slime', 'bat']), e.x + rand(-30, 30), e.y + rand(-30, 30))
+                this.float(e.x, e.y - 20, '召唤！', '#b13e53')
+              }
             }
           }
           break
@@ -992,11 +1011,11 @@ export class Game {
         g.textAlign = 'center'
         g.fillText('🔥', Math.round(W(e.x)), Math.round(H(e.y) - ih / 2 - 3))
       }
-      // 精英蓄力预警圈
-      if (e.kind === 'elite' && e.chargeT > 0.35) {
-        g.strokeStyle = 'rgba(255,90,40,0.7)'
-        g.lineWidth = 2
-        g.beginPath(); g.arc(W(e.x), H(e.y), e.r * e.scale + 4, 0, Math.PI * 2); g.stroke()
+      // 精英/Boss 蓄力预警圈
+      if ((e.kind === 'elite' || e.kind === 'boss') && e.chargeT > 0.35) {
+        g.strokeStyle = e.kind === 'boss' ? 'rgba(255,60,60,0.85)' : 'rgba(255,90,40,0.7)'
+        g.lineWidth = e.kind === 'boss' ? 3 : 2
+        g.beginPath(); g.arc(W(e.x), H(e.y), e.r * e.scale + 4 + (e.kind === 'boss' ? 4 : 0), 0, Math.PI * 2); g.stroke()
       }
       // 精英/Boss 血条
       if (e.kind === 'elite' || e.kind === 'boss') {
