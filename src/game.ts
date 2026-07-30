@@ -185,7 +185,7 @@ export class Game {
     }
     switch (this.state) {
       case 'menu':
-        if (Input.pressed('enter') || Input.pressed(' ') || Input.mclick) {
+        if (Input.pressed('enter') || Input.mclick) {
           this.reset()
           this.state = 'play'
         }
@@ -1013,7 +1013,7 @@ export class Game {
     for (const p of this.eprojs) {
       g.fillStyle = p.color
       g.beginPath()
-      g.arc(Math.round(W(p.x)), Math.round(W(p.y)), p.r, 0, Math.PI * 2)
+      g.arc(Math.round(W(p.x)), Math.round(H(p.y)), p.r, 0, Math.PI * 2)
       g.fill()
       g.strokeStyle = 'rgba(0,0,0,0.3)'
       g.stroke()
@@ -1264,7 +1264,7 @@ export class Game {
         const have = (this.passives[EVO[c.def.id].need] || 0) >= 1
         g.font = '7px monospace'
         g.fillStyle = have ? '#57e6a0' : '#8a6d3b'
-        g.fillText(`进化：满级+${needDef?.name}`, r.x + r.w / 2, r.y + r.h - 20)
+        g.fillText(`进化：满级+${needDef?.name ?? '?'}`, r.x + r.w / 2, r.y + r.h - 20)
       } else if (c.def.type === 'passive') {
         // 该被动是哪些武器的进化条件
         const unlocks = Object.entries(EVO).filter(([, v]) => v.need === c.def.id).map(([k]) => UPG.find(u => u.id === k)?.name)
