@@ -251,10 +251,11 @@ export class Game {
       this.py += mdy * this.spd * dt
     }
 
-    // 相机平滑 + 动向引导
+    // 相机平滑 + 动向引导（基于 dt 的指数平滑，帧率无关）
     const lead = 18
-    this.camX += (this.px + mdx * lead - this.camX) * 0.12
-    this.camY += (this.py + mdy * lead - this.camY) * 0.12
+    const ck = 1 - Math.exp(-dt * 7.5)
+    this.camX += (this.px + mdx * lead - this.camX) * ck
+    this.camY += (this.py + mdy * lead - this.camY) * ck
 
     // 回复
     if (this.regen > 0) this.hp = Math.min(this.maxHp, this.hp + this.regen * dt)
@@ -263,7 +264,8 @@ export class Game {
     if (this.kills >= this.nextMilestone) {
       this.float(this.px, this.py - 34, `${this.nextMilestone === 1000 ? '千人斩！！' : this.nextMilestone + ' 击杀！'}`, '#ffd75e')
       this.burst(this.px, this.py, '#ffd75e', 16)
-      this.chests.push({ x: this.px + rand(-20, 20), y: this.py + rand(-20, 20), opened: 0 })
+      const ca = rand(Math.PI * 2)
+      this.chests.push({ x: this.px + Math.cos(ca) * 36, y: this.py + Math.sin(ca) * 36, opened: 0 })
       this.float(this.px, this.py - 46, '奖励宝箱！', '#ffd75e')
       sfx.levelup()
       this.nextMilestone *= 10
@@ -812,7 +814,7 @@ export class Game {
     for (const c of this.chests) {
       if (c.opened) continue
       if (dist2(c.x, c.y, this.px, this.py) < 14 * 14) {
-        c.opened = 1 // 触发动画
+        c.opened = 0.01 // 触发开箱动画（渐进到 1）
         this.pendingLv++
         sfx.levelup()
         this.burst(c.x, c.y, '#ffd75e', 14)
@@ -1085,8 +1087,8 @@ export class Game {
     // 环绕法球
     const orb = this.weapons.find(w => w.id === 'orb')
     if (orb) {
-      const count = 1 + orb.lv
-      const radius = 30 + orb.lv * 2
+      const count = orb.evolved ? 6 + orb.lv : 1 + orb.lv
+      const radius = (30 + orb.lv * 2) * (orb.evolved ? 1.35 : 1)
       for (let i = 0; i < count; i++) {
         const a = orb.t + (Math.PI * 2 * i) / count
         this.blit(SPR.orb, W(this.px + Math.cos(a) * radius), H(this.py + Math.sin(a) * radius))
