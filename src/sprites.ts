@@ -239,4 +239,6 @@ export const SPR: Record<string, HTMLCanvasElement> = {
   ic_wisdom: emblem('#b98cff', '#ecdfff'),
   ic_regen: emblem('#7de37d', '#ddffdd'),
   ic_snack: emblem('#f0c090', '#ffeeda'),
+  ic_boomer: emblem('#ffd75e', '#fff0b0'),
+  ic_homing: emblem('#ff6b6b', '#ffd0d0'),
 }

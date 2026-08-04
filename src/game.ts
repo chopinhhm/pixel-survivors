@@ -25,6 +25,7 @@ interface Enemy {
   spd: number; dmg: number; r: number; xp: number
   flash: number; auraCd: number; orbCd: number
   scale: number; spawnScale: number; deathT: number
+  splits: number // 分裂史莱姆：死亡时分裂出的代数
   burn: number; burnT: number // 炼狱光环的持续燃烧
   atkT: number // 远程攻击冷却（骷髅）
   dashT: number; dashCd: number; dashDx: number; dashDy: number // 小恶魔突进方向
@@ -34,6 +35,8 @@ interface Enemy {
 }
 interface Proj { x: number; y: number; vx: number; vy: number; dmg: number; life: number; pierce: number; angle: number }
 interface EProj { x: number; y: number; vx: number; vy: number; dmg: number; life: number; r: number; color: string }
+interface Boomer { x: number; y: number; vx: number; vy: number; t: number; out: number; back: boolean; dmg: number; hit: Set<number>; ang: number }
+interface Homer { x: number; y: number; vx: number; vy: number; life: number; dmg: number; pierce: number; targetId: number }
 interface Gem { x: number; y: number; val: number; vx: number; vy: number }
 interface Heart { x: number; y: number }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: string; size: number }
@@ -55,6 +58,8 @@ const EVO: Record<string, { need: string; name: string; desc: string }> = {
   nova: { need: 'vital', name: '超新星', desc: '进化！巨大的双重冲击波' },
   bolt: { need: 'wisdom', name: '雷暴', desc: '进化！雷电如暴雨般落下' },
   aura: { need: 'magnet', name: '炼狱', desc: '进化！烈焰灼烧并留下余烬' },
+  boomer: { need: 'speed', name: '回旋风暴', desc: '进化！三刃齐飞去而复返' },
+  homing: { need: 'regen', name: '天启导弹', desc: '进化！追踪导弹如雨点袭来' },
 }
 
 const UPG: UpDef[] = [
@@ -63,6 +68,8 @@ const UPG: UpDef[] = [
   { id: 'nova', type: 'weapon', maxLv: 5, name: '新星冲击', desc: '周期性释放环形冲击波', icon: 'ic_nova' },
   { id: 'bolt', type: 'weapon', maxLv: 5, name: '落雷', desc: '雷电劈向随机敌人', icon: 'ic_bolt' },
   { id: 'aura', type: 'weapon', maxLv: 5, name: '灼热光环', desc: '持续灼烧周围的敌人', icon: 'ic_aura' },
+  { id: 'boomer', type: 'weapon', maxLv: 5, name: '回旋刃', desc: '掷出回旋刃，去而复返双重打击', icon: 'ic_boomer' },
+  { id: 'homing', type: 'weapon', maxLv: 5, name: '追踪飞弹', desc: '发射自动追踪敌人的飞弹', icon: 'ic_homing' },
   { id: 'speed', type: 'passive', maxLv: 5, name: '疾风之靴', desc: '移动速度 +10%', icon: 'ic_speed' },
   { id: 'vital', type: 'passive', maxLv: 5, name: '生命宝石', desc: '生命上限 +25 并回复 25', icon: 'ic_vital' },
   { id: 'power', type: 'passive', maxLv: 5, name: '力量护符', desc: '所有伤害 +12%', icon: 'ic_power' },
@@ -126,6 +133,8 @@ export class Game {
   enemies: Enemy[] = []
   projs: Proj[] = []
   eprojs: EProj[] = [] // 敌方弹体
+  boomers: Boomer[] = []
+  homers: Homer[] = []
   gems: Gem[] = []
   hearts: Heart[] = []
   chests: Chest[] = []
@@ -172,6 +181,7 @@ export class Game {
     this.passives = {}
     this.enemies = []; this.projs = []; this.eprojs = []; this.gems = []; this.hearts = []
     this.chests = []; this.novas = []; this.bolts = []; this.parts = []; this.floats = []
+    this.boomers = []; this.homers = []
     this.spawnT = 0.5; this.eid = 1; this.eliteIdx = 0
     this.bossSpawned = false; this.boss = null
     this.nextSurge = SURGE_INTERVAL; this.surgeMode = 0; this.nextMilestone = 100
@@ -279,6 +289,8 @@ export class Game {
     this.updateWeapons(dt)
     this.updateProjs(dt)
     this.updateEProjs(dt)
+    this.updateBoomers(dt)
+    this.updateHomers(dt)
     this.updateNovas(dt)
     this.updatePickups(dt)
     this.updateChests(dt)
@@ -347,7 +359,14 @@ export class Game {
         if (this.t > 45 && chance(0.4)) kind = 'bat'
         if (this.t > 120 && chance(0.3)) kind = 'skel'
         if (this.t > 210 && chance(0.25)) kind = 'skel'
-        this.spawnEnemy(kind)
+        const e = this.spawnEnemy(kind)
+        // 分裂史莱姆：更大更肉，死亡时裂成两只小史莱姆
+        if (kind === 'slime' && this.t > 30 && chance(0.12)) {
+          e.splits = 1
+          e.scale *= 1.6
+          e.r *= 1.4
+          e.hp = e.maxHp = e.maxHp * 2.2
+        }
       }
     }
   }
@@ -366,7 +385,7 @@ export class Game {
       x, y,
       hp: base.hp * hpScale, maxHp: base.hp * hpScale,
       spd: base.spd * rand(0.9, 1.1), dmg: base.dmg * dmgScale,
-      r: base.r, xp: base.xp, scale: base.scale, spawnScale: 0, deathT: 0,
+      r: base.r, xp: base.xp, scale: base.scale, spawnScale: 0, deathT: 0, splits: 0,
       flash: 0, auraCd: 0, orbCd: 0,
       burn: 0, burnT: 0,
       atkT: rand(1.5, 3),
@@ -646,8 +665,87 @@ export class Game {
           })
         }
         if (inRange.length > 0) sfx.zap()
+      } else if (w.id === 'boomer') {
+        w.t = 1.7 * this.cdMul * (w.evolved ? 0.7 : 1)
+        const dmg = (7 + 3 * w.lv) * this.dmgMul * (w.evolved ? 1.5 : 1)
+        const shots = w.evolved ? 3 : 1
+        const target = this.nearestEnemy(300)
+        const baseA = target ? Math.atan2(target.y - this.py, target.x - this.px) : (this.face > 0 ? 0 : Math.PI)
+        const out = 0.42 + 0.03 * w.lv
+        for (let i = 0; i < shots; i++) {
+          const a = baseA + (i - (shots - 1) / 2) * 0.5
+          this.boomers.push({ x: this.px, y: this.py, vx: Math.cos(a) * 230, vy: Math.sin(a) * 230, t: 0, out, back: false, dmg, hit: new Set(), ang: 0 })
+        }
+        sfx.shoot()
+      } else if (w.id === 'homing') {
+        w.t = 0.95 * this.cdMul * (w.evolved ? 0.6 : 1)
+        const dmg = (6 + 3 * w.lv) * this.dmgMul * (w.evolved ? 1.5 : 1)
+        const shots = w.evolved ? 3 : 1 + Math.floor((w.lv - 1) / 2)
+        for (let i = 0; i < shots; i++) {
+          const a = rand(Math.PI * 2)
+          this.homers.push({ x: this.px, y: this.py, vx: Math.cos(a) * 110, vy: Math.sin(a) * 110, life: 2.6, dmg, pierce: w.evolved ? 2 : 1, targetId: -1 })
+        }
+        sfx.shoot()
       }
     }
+  }
+
+  // ---------- 回旋刃：飞出一段后飞回玩家，两趟都能命中 ----------
+  updateBoomers(dt: number) {
+    for (const b of this.boomers) {
+      b.t += dt
+      b.ang += dt * 20 // 自旋
+      if (!b.back) {
+        b.x += b.vx * dt
+        b.y += b.vy * dt
+        if (b.t >= b.out) { b.back = true; b.hit.clear() } // 折返，允许再次命中
+      } else {
+        const dx = this.px - b.x, dy = this.py - b.y
+        const d = Math.hypot(dx, dy) || 1
+        b.x += (dx / d) * 280 * dt
+        b.y += (dy / d) * 280 * dt
+        if (d < 10) b.t = 999 // 回到手中，移除
+      }
+      this.forEachNear(b.x, b.y, 12, e => {
+        if (b.hit.has(e.id)) return
+        if (dist2(b.x, b.y, e.x, e.y) < (7 + e.r) ** 2) {
+          b.hit.add(e.id)
+          this.damage(e, b.dmg)
+          if (chance(0.3)) sfx.hit()
+        }
+      })
+    }
+    this.boomers = this.boomers.filter(b => b.t < 6)
+  }
+
+  // ---------- 追踪飞弹：转向锁定的目标 ----------
+  updateHomers(dt: number) {
+    for (const h of this.homers) {
+      h.life -= dt
+      if (h.life <= 0) continue
+      let target: Enemy | null = this.enemies.find(e => e.id === h.targetId && !e.dead) ?? null
+      if (!target) { target = this.nearestEnemy(9999); h.targetId = target ? target.id : -1 }
+      if (target) {
+        const dx = target.x - h.x, dy = target.y - h.y
+        const d = Math.hypot(dx, dy) || 1
+        const sp = 210
+        const turn = Math.min(1, 6 * dt)
+        h.vx += (dx / d * sp - h.vx) * turn
+        h.vy += (dy / d * sp - h.vy) * turn
+      }
+      h.x += h.vx * dt
+      h.y += h.vy * dt
+      this.forEachNear(h.x, h.y, 10, e => {
+        if (h.pierce <= 0 || e.dead) return
+        if (dist2(h.x, h.y, e.x, e.y) < (4 + e.r) ** 2) {
+          h.pierce--
+          this.damage(e, h.dmg)
+          if (h.pierce <= 0) h.life = 0
+          if (chance(0.3)) sfx.hit()
+        }
+      })
+    }
+    this.homers = this.homers.filter(h => h.life > 0)
   }
 
   nearestEnemy(maxDist: number): Enemy | null {
@@ -759,6 +857,18 @@ export class Game {
     } else {
       this.gems.push({ x: e.x, y: e.y, val: e.xp, vx: 0, vy: 0 })
       if (chance(e.kind === 'skel' ? 0.05 : 0.02)) this.hearts.push({ x: e.x, y: e.y })
+    }
+    // 分裂史莱姆：裂成两只更小的
+    if (e.kind === 'slime' && e.splits > 0) {
+      for (let i = 0; i < 2; i++) {
+        const a = rand(Math.PI * 2)
+        const c = this.spawnEnemyAt('slime', e.x + Math.cos(a) * 8, e.y + Math.sin(a) * 8)
+        c.splits = e.splits - 1
+        c.scale = e.scale * 0.6
+        c.r = Math.max(3, e.r * 0.65)
+        c.hp = c.maxHp = e.maxHp * 0.35
+        c.spawnScale = 0.6
+      }
     }
   }
 
@@ -1026,7 +1136,8 @@ export class Game {
       const af = Math.floor(this.frameT * 8 + e.id) % 4
       const faceLeft = this.px < e.x
       const baseScale = ENEMY_DRAW_SCALE[e.kind] ?? 1
-      const drawScale = baseScale * e.spawnScale * (e.dead ? Math.max(0, e.deathT / 0.18) : 1)
+      const sizeMul = e.r / ENEMY_BASE[e.kind].r // 分裂怪按碰撞半径缩放，视觉与判定一致
+      const drawScale = baseScale * sizeMul * e.spawnScale * (e.dead ? Math.max(0, e.deathT / 0.18) : 1)
       const img = frame(e.kind, af, faceLeft) as CanvasImageSource
       const iw = (img as any).width * drawScale
       const ih = (img as any).height * drawScale
@@ -1102,6 +1213,27 @@ export class Game {
       g.rotate(p.angle)
       g.drawImage(SPR.knife, -4, -1)
       g.restore()
+    }
+
+    // 回旋刃（快速自旋）
+    for (const b of this.boomers) {
+      g.save()
+      g.translate(W(b.x), H(b.y))
+      g.rotate(b.ang)
+      g.drawImage(SPR.knife, -4, -1)
+      g.restore()
+    }
+
+    // 追踪飞弹（朝速度方向的箭头 + 拖尾）
+    for (const h of this.homers) {
+      const ang = Math.atan2(h.vy, h.vx)
+      g.save()
+      g.translate(W(h.x), H(h.y))
+      g.rotate(ang)
+      g.fillStyle = '#ff6b6b'
+      g.beginPath(); g.moveTo(4, 0); g.lineTo(-3, -2); g.lineTo(-3, 2); g.closePath(); g.fill()
+      g.restore()
+      if (chance(0.5)) this.parts.push({ x: h.x, y: h.y, vx: 0, vy: 0, life: 0.2, maxLife: 0.2, color: '#ff9f6b', size: 1 })
     }
 
     // 新星
