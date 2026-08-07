@@ -204,6 +204,56 @@ const orbRows = [
 ]
 const orbPal: Pal = { M: '#e05be0', m: '#8f2bb8', X: '#ffd9ff' }
 
+// ---------- 地牢地砖（程序化生成，暗色石砖风格）----------
+// 原 0x72 仓库已 404，改为代码生成；固定种子保证每次运行一致
+function floorTile(seed: number): HTMLCanvasElement {
+  const c = document.createElement('canvas')
+  c.width = 16
+  c.height = 16
+  const g = c.getContext('2d')!
+  let s = (seed * 2654435761) >>> 0
+  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296)
+
+  // 石砖底色
+  g.fillStyle = '#32324a'
+  g.fillRect(0, 0, 16, 16)
+  // 颗粒噪点，制造石material质感
+  for (let i = 0; i < 46; i++) {
+    const x = Math.floor(rnd() * 16), y = Math.floor(rnd() * 16)
+    const v = rnd()
+    g.fillStyle = v > 0.66 ? '#3b3b57' : v > 0.33 ? '#2c2c42' : '#36364f'
+    g.fillRect(x, y, 1, 1)
+  }
+  // 砖缝：上/左描暗边，内侧提亮，形成立体感
+  g.fillStyle = '#202034'
+  g.fillRect(0, 0, 16, 1)
+  g.fillRect(0, 0, 1, 16)
+  g.fillStyle = '#40405e'
+  g.fillRect(1, 1, 14, 1)
+  g.fillRect(1, 1, 1, 14)
+  // 随机裂纹
+  if (rnd() < 0.4) {
+    let x = 3 + Math.floor(rnd() * 10), y = 3 + Math.floor(rnd() * 10)
+    g.fillStyle = '#26263c'
+    for (let i = 0; i < 6; i++) {
+      g.fillRect(x, y, 1, 1)
+      if (rnd() < 0.6) x += rnd() < 0.5 ? 1 : -1
+      if (rnd() < 0.7) y += 1
+      if (x < 0 || x > 15 || y > 15) break
+    }
+  }
+  // 少量苔藓/污渍点缀
+  if (rnd() < 0.18) {
+    const x = 2 + Math.floor(rnd() * 12), y = 2 + Math.floor(rnd() * 12)
+    g.fillStyle = '#2f4438'
+    g.fillRect(x, y, 2, 1)
+    g.fillRect(x, y + 1, 1, 1)
+  }
+  return c
+}
+
+export const FLOOR: HTMLCanvasElement[] = Array.from({ length: 12 }, (_, i) => floorTile(i + 1))
+
 // ---------- 导出 ----------
 const hero1 = sprite(heroRows1, heroPal)
 const hero2 = sprite(heroRows2, heroPal)

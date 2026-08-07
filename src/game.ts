@@ -1,4 +1,4 @@
-import { SPR } from './sprites'
+import { SPR, FLOOR } from './sprites'
 import { frame } from './assets'
 import { Input } from './input'
 import { sfx, toggleMute, isMuted } from './audio'
@@ -7,8 +7,8 @@ import { clamp, rand, pick, chance, dist2, shuffle, fmtTime } from './util'
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
 const ENEMY_DRAW_SCALE: Record<string, number> = { slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6 }
 
-export const VW = 480
-export const VH = 270
+export const VW = 640
+export const VH = 360
 
 const WIN_TIME = 300 // 坚持 5 分钟胜利
 const BOSS_TIME = 240
@@ -177,6 +177,16 @@ export class Game {
   get xpMul() { return 1 + 0.15 * (this.passives.wisdom || 0) }
   get regen() { return 0.6 * (this.passives.regen || 0) }
   get critChance() { return 0.05 + 0.08 * (this.passives.crit || 0) }
+
+  // 鼠标在世界坐标中的位置（相机取整口径与 draw 保持一致）
+  get aimX() { return Math.round(this.camX - VW / 2) + Input.mx }
+  get aimY() { return Math.round(this.camY - VH / 2) + Input.my }
+  // 玩家 → 鼠标的朝向；鼠标压在身上时回退到面朝方向，避免角度乱跳
+  get aimAngle() {
+    const dx = this.aimX - this.px, dy = this.aimY - this.py
+    if (dx * dx + dy * dy < 36) return this.face > 0 ? 0 : Math.PI
+    return Math.atan2(dy, dx)
+  }
 
   reset() {
     this.t = 0; this.kills = 0; this.shake = 0
@@ -648,8 +658,7 @@ export class Game {
           }
         } else {
           const count = [1, 2, 2, 3, 4][w.lv - 1]
-          const target = this.nearestEnemy(280)
-          const baseA = target ? Math.atan2(target.y - this.py, target.x - this.px) : (this.face > 0 ? 0 : Math.PI)
+          const baseA = this.aimAngle // 朝鼠标方向发射
           for (let i = 0; i < count; i++) {
             const a = baseA + (i - (count - 1) / 2) * 0.16
             this.projs.push({
@@ -692,8 +701,7 @@ export class Game {
         w.t = 1.7 * this.cdMul * (w.evolved ? 0.7 : 1)
         const dmg = (7 + 3 * w.lv) * this.dmgMul * (w.evolved ? 1.5 : 1)
         const shots = w.evolved ? 3 : 1
-        const target = this.nearestEnemy(300)
-        const baseA = target ? Math.atan2(target.y - this.py, target.x - this.px) : (this.face > 0 ? 0 : Math.PI)
+        const baseA = this.aimAngle // 朝鼠标方向掷出
         const out = 0.42 + 0.03 * w.lv
         for (let i = 0; i < shots; i++) {
           const a = baseA + (i - (shots - 1) / 2) * 0.5
@@ -704,8 +712,9 @@ export class Game {
         w.t = 0.95 * this.cdMul * (w.evolved ? 0.6 : 1)
         const dmg = (6 + 3 * w.lv) * this.dmgMul * (w.evolved ? 1.5 : 1)
         const shots = w.evolved ? 3 : 1 + Math.floor((w.lv - 1) / 2)
+        // 朝鼠标方向散射发射，之后自行追踪
         for (let i = 0; i < shots; i++) {
-          const a = rand(Math.PI * 2)
+          const a = this.aimAngle + rand(-0.45, 0.45)
           this.homers.push({ x: this.px, y: this.py, vx: Math.cos(a) * 110, vy: Math.sin(a) * 110, life: 2.6, dmg, pierce: w.evolved ? 2 : 1, targetId: -1 })
         }
         sfx.shoot()
@@ -1128,8 +1137,9 @@ export class Game {
     // 相机（含震动）
     const sx = this.shake > 0 ? rand(-3, 3) * this.shake : 0
     const sy = this.shake > 0 ? rand(-3, 3) * this.shake : 0
-    const cx = this.camX - VW / 2 + sx
-    const cy = this.camY - VH / 2 + sy
+    // 相机取整：像素对齐，消除缩放后的抖动/糊边
+    const cx = Math.round(this.camX - VW / 2 + sx)
+    const cy = Math.round(this.camY - VH / 2 + sy)
 
     this.drawGround(cx, cy)
 
@@ -1225,6 +1235,7 @@ export class Game {
 
     // 敌方弹体（骨头 / 火球）
     for (const p of this.eprojs) {
+      this.glow(W(p.x), H(p.y), p.r * 3.5, p.color, 0.45)
       g.fillStyle = p.color
       g.beginPath()
       g.arc(Math.round(W(p.x)), Math.round(H(p.y)), p.r, 0, Math.PI * 2)
@@ -1253,7 +1264,9 @@ export class Game {
       const radius = (30 + orb.lv * 2) * (orb.evolved ? 1.35 : 1)
       for (let i = 0; i < count; i++) {
         const a = orb.t + (Math.PI * 2 * i) / count
-        this.blit(SPR.orb, W(this.px + Math.cos(a) * radius), H(this.py + Math.sin(a) * radius))
+        const ox = W(this.px + Math.cos(a) * radius), oy = H(this.py + Math.sin(a) * radius)
+        this.glow(ox, oy, 9, orb.evolved ? '#ff7bff' : '#e05be0', 0.55)
+        this.blit(SPR.orb, ox, oy)
       }
     }
 
@@ -1275,9 +1288,10 @@ export class Game {
       g.restore()
     }
 
-    // 追踪飞弹（朝速度方向的箭头 + 拖尾）
+    // 追踪飞弹（朝速度方向的箭头 + 辉光 + 拖尾）
     for (const h of this.homers) {
       const ang = Math.atan2(h.vy, h.vx)
+      this.glow(W(h.x), H(h.y), 8, '#ff6b6b', 0.5)
       g.save()
       g.translate(W(h.x), H(h.y))
       g.rotate(ang)
@@ -1287,21 +1301,35 @@ export class Game {
       if (chance(0.5)) this.parts.push({ x: h.x, y: h.y, vx: 0, vy: 0, life: 0.2, maxLife: 0.2, color: '#ff9f6b', size: 1 })
     }
 
-    // 新星
+    // 新星（带辉光环）
     for (const n of this.novas) {
-      g.strokeStyle = `rgba(255,215,94,${1 - n.r / n.maxR})`
-      g.lineWidth = 3
+      const fade = 1 - n.r / n.maxR
+      g.save()
+      g.globalCompositeOperation = 'lighter'
+      g.strokeStyle = `rgba(255,215,94,${fade * 0.35})`
+      g.lineWidth = 7
+      g.beginPath(); g.arc(W(n.x), H(n.y), n.r, 0, Math.PI * 2); g.stroke()
+      g.restore()
+      g.strokeStyle = `rgba(255,240,190,${fade})`
+      g.lineWidth = 2
       g.beginPath(); g.arc(W(n.x), H(n.y), n.r, 0, Math.PI * 2); g.stroke()
     }
 
-    // 闪电
+    // 闪电（外层辉光 + 内层亮芯）
     for (const b of this.bolts) {
-      g.strokeStyle = `rgba(190,230,255,${b.life / 0.18})`
-      g.lineWidth = 1.5
-      g.beginPath()
-      g.moveTo(W(b.pts[0]), H(b.pts[1]))
-      for (let i = 2; i < b.pts.length; i += 2) g.lineTo(W(b.pts[i]), H(b.pts[i + 1]))
-      g.stroke()
+      const a = b.life / 0.18
+      g.save()
+      g.globalCompositeOperation = 'lighter'
+      for (const [lw, col] of [[5, `rgba(90,170,255,${a * 0.4})`], [2.5, `rgba(190,230,255,${a})`], [1, `rgba(255,255,255,${a})`]] as [number, string][]) {
+        g.strokeStyle = col
+        g.lineWidth = lw
+        g.beginPath()
+        g.moveTo(W(b.pts[0]), H(b.pts[1]))
+        for (let i = 2; i < b.pts.length; i += 2) g.lineTo(W(b.pts[i]), H(b.pts[i + 1]))
+        g.stroke()
+      }
+      g.restore()
+      this.glow(W(b.pts[b.pts.length - 2]), H(b.pts[b.pts.length - 1]), 16, '#9fdcff', a * 0.6)
     }
 
     // 粒子 & 飘字
@@ -1319,6 +1347,27 @@ export class Game {
       g.fillText(f.txt, Math.round(W(f.x)), Math.round(H(f.y)))
     }
     g.globalAlpha = 1
+
+    // 准星 + 朝向指示（让"我在瞄哪"一目了然）
+    if (this.state === 'play' || this.state === 'pause') {
+      const ax = W(this.aimX), ay = H(this.aimY)
+      const aimA = this.aimAngle
+      // 玩家身前的朝向小箭头
+      const ind = 16
+      this.glow(W(this.px + Math.cos(aimA) * ind), H(this.py + Math.sin(aimA) * ind), 5, '#57c7ff', 0.5)
+      // 准星
+      g.strokeStyle = 'rgba(255,255,255,0.85)'
+      g.lineWidth = 1
+      g.beginPath()
+      g.arc(ax, ay, 5, 0, Math.PI * 2)
+      g.stroke()
+      g.beginPath()
+      g.moveTo(ax - 8, ay); g.lineTo(ax - 3, ay)
+      g.moveTo(ax + 3, ay); g.lineTo(ax + 8, ay)
+      g.moveTo(ax, ay - 8); g.lineTo(ax, ay - 3)
+      g.moveTo(ax, ay + 3); g.lineTo(ax, ay + 8)
+      g.stroke()
+    }
 
     // 受击红闪 + 濒死警示边框
     if (this.hurtFlash > 0) {
@@ -1345,6 +1394,22 @@ export class Game {
     this.g.drawImage(spr, Math.round(x - w / 2), Math.round(y - h / 2), w, h)
   }
 
+  // 加色辉光：叠在特效下层，制造发光感
+  glow(x: number, y: number, r: number, color: string, alpha = 0.5) {
+    const g = this.g
+    g.save()
+    g.globalCompositeOperation = 'lighter'
+    g.globalAlpha = alpha
+    const rg = g.createRadialGradient(x, y, 0, x, y, r)
+    rg.addColorStop(0, color)
+    rg.addColorStop(1, 'rgba(0,0,0,0)')
+    g.fillStyle = rg
+    g.beginPath()
+    g.arc(x, y, r, 0, Math.PI * 2)
+    g.fill()
+    g.restore()
+  }
+
   // 椭圆投影，增强立体感
   shadow(x: number, y: number, rx: number) {
     const g = this.g
@@ -1359,22 +1424,21 @@ export class Game {
 
   drawGround(cx: number, cy: number) {
     const g = this.g
-    g.fillStyle = '#0d0f1c'
-    g.fillRect(0, 0, VW, VH)
     const ts = 16
     const x0 = Math.floor(cx / ts), y0 = Math.floor(cy / ts)
+    // 铺满地牢石砖，按坐标哈希选变体（无状态，滚动时不会闪烁）
     for (let ty = y0; ty <= y0 + VH / ts + 1; ty++) {
       for (let tx = x0; tx <= x0 + VW / ts + 1; tx++) {
         const h = ((tx * 73856093) ^ (ty * 19349663)) >>> 0
-        if (h % 7 === 0) {
-          g.fillStyle = '#141830'
-          g.fillRect(tx * ts - cx + (h % 11), ty * ts - cy + (h % 13), 2, 2)
-        } else if (h % 11 === 0) {
-          g.fillStyle = '#10142a'
-          g.fillRect(tx * ts - cx + (h % 9), ty * ts - cy + (h % 7), 3, 1)
-        }
+        g.drawImage(FLOOR[h % FLOOR.length], tx * ts - cx, ty * ts - cy)
       }
     }
+    // 暗角：四周压暗，把注意力收到中心
+    const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.35, VW / 2, VH / 2, VH * 0.85)
+    vg.addColorStop(0, 'rgba(0,0,0,0)')
+    vg.addColorStop(1, 'rgba(0,0,0,0.55)')
+    g.fillStyle = vg
+    g.fillRect(0, 0, VW, VH)
   }
 
   drawHud() {
@@ -1426,7 +1490,7 @@ export class Game {
       g.textAlign = 'center'
       g.fillStyle = `rgba(255,255,255,${clamp(8 - this.t, 0, 1) * 0.8})`
       g.font = '9px monospace'
-      g.fillText('WASD 移动 · Space/Shift 冲刺 · 坚持 5 分钟！', VW / 2, VH - 28)
+      g.fillText('WASD 移动 · 鼠标瞄准 · Space/Shift 冲刺 · 坚持 5 分钟！', VW / 2, VH - 28)
     }
     // 武器栏（左上角，已进化高亮）
     let wx = 4
@@ -1476,10 +1540,10 @@ export class Game {
     g.textAlign = 'center'
     g.font = 'bold 16px monospace'
     g.fillStyle = '#ffd75e'
-    g.fillText('升 级 ！', VW / 2, 46)
+    g.fillText('升 级 ！', VW / 2, this.cardRects()[0].y - 58)
     g.font = '9px monospace'
     g.fillStyle = '#9aa4c8'
-    g.fillText('选择一项强化（点击 或 按 1 / 2 / 3）', VW / 2, 62)
+    g.fillText('选择一项强化（点击 或 按 1 / 2 / 3）', VW / 2, this.cardRects()[0].y - 38)
     // 重掷提示
     g.font = '8px monospace'
     g.fillStyle = this.rerolls > 0 ? '#57e6a0' : '#5c6285'
@@ -1561,38 +1625,40 @@ export class Game {
 
   drawEnd() {
     const g = this.g
+    const cx = VW / 2
     g.fillStyle = 'rgba(7,7,13,0.82)'
     g.fillRect(0, 0, VW, VH)
     g.textAlign = 'center'
+    let y = VH * 0.24
     g.font = 'bold 22px monospace'
     if (this.win) {
       g.fillStyle = '#ffd75e'
-      g.fillText('胜 利 ！', VW / 2, 80)
+      g.fillText('胜 利 ！', cx, y)
       g.font = '9px monospace'
       g.fillStyle = '#9aa4c8'
-      g.fillText('你在怪物狂潮中活了下来', VW / 2, 100)
+      g.fillText('你在怪物狂潮中活了下来', cx, y + 22)
     } else {
       g.fillStyle = '#ff4f6b'
-      g.fillText('你倒下了……', VW / 2, 80)
+      g.fillText('你倒下了……', cx, y)
     }
+    y = VH * 0.44
     g.font = '10px monospace'
     g.fillStyle = '#ffffff'
-    g.fillText(`存活时间  ${fmtTime(this.t)}`, VW / 2, 128)
-    g.fillText(`击杀数    ${this.kills}`, VW / 2, 145)
-    g.fillText(`等级      Lv ${this.level}`, VW / 2, 162)
+    g.fillText(`存活时间  ${fmtTime(this.t)}`, cx, y); y += 17
+    g.fillText(`击杀数    ${this.kills}`, cx, y); y += 17
+    g.fillText(`等级      Lv ${this.level}`, cx, y); y += 17
     const evoCount = this.weapons.filter(w => w.evolved).length
     if (evoCount > 0) {
       g.fillStyle = '#ffd75e'
-      g.fillText(`武器进化  ${evoCount} 件`, VW / 2, 179)
+      g.fillText(`武器进化  ${evoCount} 件`, cx, y); y += 17
     }
     if (this.newRecord) {
       g.fillStyle = '#57e6a0'
-      g.fillText('★ 新纪录！', VW / 2, 197)
+      g.fillText('★ 新纪录！', cx, y)
     }
     g.fillStyle = '#9aa4c8'
     g.font = '9px monospace'
-    const blink = Math.floor(this.frameT * 2) % 2 === 0
-    if (blink) g.fillText('按 R 或点击 返回标题', VW / 2, 220)
+    if (Math.floor(this.frameT * 2) % 2 === 0) g.fillText('按 R 或点击 返回标题', cx, VH * 0.86)
   }
 
   drawMenu() {
@@ -1607,20 +1673,21 @@ export class Game {
       g.fillStyle = i % 3 === 0 ? '#171a2e' : '#141830'
       g.fillRect(Math.floor(x), y, 2, 2)
     }
-    // 主角立绘（骑士 idle 动画，头顶橙色羽饰）
+    // 主角立绘（骑士 idle 动画）
     const spr = frame('player_idle', Math.floor(this.frameT * 5) % 4) as CanvasImageSource
     g.imageSmoothingEnabled = false
-    const kh = 84, kw = 48
-    this.shadow(VW / 2, 22 + kh, 16)
-    g.drawImage(spr, VW / 2 - kw / 2, 20, kw, kh)
+    const kh = VH * 0.28, kw = kh * 0.57
+    const ky = VH * 0.06
+    this.shadow(VW / 2, ky + kh, 16)
+    g.drawImage(spr, VW / 2 - kw / 2, ky, kw, kh)
     // 标题
     g.textAlign = 'center'
     g.font = 'bold 26px monospace'
     g.fillStyle = '#ffd75e'
-    g.fillText('像 素 幸 存 者', VW / 2, 134)
+    g.fillText('像 素 幸 存 者', VW / 2, VH * 0.46)
     g.font = '10px monospace'
     g.fillStyle = '#57c7ff'
-    g.fillText('- PIXEL SURVIVORS -', VW / 2, 152)
+    g.fillText('- PIXEL SURVIVORS -', VW / 2, VH * 0.52)
     // 敌人展示行
     const foes: EnemyKind[] = ['slime', 'bat', 'skel', 'elite', 'boss']
     const ef = Math.floor(this.frameT * 6) % 4
@@ -1629,7 +1696,7 @@ export class Game {
       const fi = frame(k, ef) as CanvasImageSource
       const s = k === 'boss' ? 1.2 : k === 'elite' ? 0.9 : 1.1
       const w = (fi as any).width * s, hh = (fi as any).height * s
-      g.drawImage(fi, Math.round(fx - w / 2), Math.round(176 - hh / 2), w, hh)
+      g.drawImage(fi, Math.round(fx - w / 2), Math.round(VH * 0.62 - hh / 2), w, hh)
       fx += 20
     }
     // 最佳纪录
@@ -1637,17 +1704,17 @@ export class Game {
       g.fillStyle = '#9aa4c8'
       g.font = '8px monospace'
       const wins = this.best.wins > 0 ? ` · 通关 ${this.best.wins} 次` : ''
-      g.fillText(`最佳纪录  存活 ${fmtTime(this.best.time)} · 击杀 ${this.best.kills}${wins}`, VW / 2, 198)
+      g.fillText(`最佳纪录  存活 ${fmtTime(this.best.time)} · 击杀 ${this.best.kills}${wins}`, VW / 2, VH * 0.71)
     }
     // 开始提示（闪烁）
     if (Math.floor(this.frameT * 2) % 2 === 0) {
       g.font = 'bold 11px monospace'
       g.fillStyle = '#ffffff'
-      g.fillText('点击 或 按 Enter 开始', VW / 2, 220)
+      g.fillText('点击 或 按 Enter 开始', VW / 2, VH * 0.80)
     }
     g.font = '8px monospace'
     g.fillStyle = '#5c6285'
-    g.fillText('WASD 移动 · 武器自动攻击 · Space/Shift 冲刺 · 升级三选一 (R 重掷)', VW / 2, 242)
-    g.fillText('坚持 5 分钟 · P 暂停 · M 静音', VW / 2, 255)
+    g.fillText('WASD 移动 · 鼠标瞄准 · Space/Shift 冲刺 · 升级三选一 (R 重掷)', VW / 2, VH * 0.90)
+    g.fillText('坚持 5 分钟 · P 暂停 · M 静音', VW / 2, VH * 0.945)
   }
 }
