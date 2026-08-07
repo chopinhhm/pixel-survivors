@@ -40,7 +40,7 @@ interface Homer { x: number; y: number; vx: number; vy: number; life: number; dm
 interface Gem { x: number; y: number; val: number; vx: number; vy: number }
 interface Heart { x: number; y: number }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: string; size: number }
-interface FloatText { x: number; y: number; txt: string; life: number; color: string }
+interface FloatText { x: number; y: number; txt: string; life: number; color: string; size: number }
 interface Nova { x: number; y: number; r: number; maxR: number; dmg: number; hit: Set<number> }
 interface Bolt { pts: number[]; life: number }
 interface WeaponState { id: string; lv: number; t: number; evolved: boolean }
@@ -77,6 +77,7 @@ const UPG: UpDef[] = [
   { id: 'magnet', type: 'passive', maxLv: 5, name: '磁力戒指', desc: '拾取范围 +45%', icon: 'ic_magnet' },
   { id: 'wisdom', type: 'passive', maxLv: 5, name: '智慧之书', desc: '经验获取 +15%', icon: 'ic_wisdom' },
   { id: 'regen', type: 'passive', maxLv: 5, name: '再生药剂', desc: '每秒回复 0.6 生命', icon: 'ic_regen' },
+  { id: 'crit', type: 'passive', maxLv: 5, name: '致命目镜', desc: '暴击率 +8%（暴击造成双倍伤害）', icon: 'ic_crit' },
 ]
 const SNACK: UpDef = { id: 'snack', type: 'snack', maxLv: 99, name: '烤鸡腿', desc: '立刻回复 40 生命', icon: 'ic_snack' }
 
@@ -123,6 +124,12 @@ export class Game {
   dashT = 0 // 冲刺进行中剩余时间
   dashCd = 0 // 冲刺冷却
   dashX = 0; dashY = 0
+  dashBuf = 0 // 冲刺输入缓冲：冷却结束前按下也会记住
+
+  // 打击感
+  hitStop = 0 // 顿帧：命中大目标时短暂冻结
+  hurtFlash = 0 // 受击红闪
+  rerolls = 3 // 升级重掷次数
 
   level = 1; xp = 0; xpNext = 8
   pendingLv = 0
@@ -169,13 +176,15 @@ export class Game {
   get magnetR() { return 28 * (1 + 0.45 * (this.passives.magnet || 0)) }
   get xpMul() { return 1 + 0.15 * (this.passives.wisdom || 0) }
   get regen() { return 0.6 * (this.passives.regen || 0) }
+  get critChance() { return 0.05 + 0.08 * (this.passives.crit || 0) }
 
   reset() {
     this.t = 0; this.kills = 0; this.shake = 0
     this.px = 0; this.py = 0
     this.camX = 0; this.camY = 0
     this.maxHp = 100; this.hp = 100; this.invuln = 0
-    this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0
+    this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0; this.dashBuf = 0
+    this.hitStop = 0; this.hurtFlash = 0; this.rerolls = 3
     this.level = 1; this.xp = 0; this.xpNext = 8; this.pendingLv = 0
     this.weapons = [{ id: 'knife', lv: 1, t: 0.2, evolved: false }]
     this.passives = {}
@@ -190,6 +199,15 @@ export class Game {
 
   // ---------- 主循环 ----------
   update(dt: number) {
+    // 顿帧：冻结模拟与动画，但仍采集输入
+    // （main.ts 每帧都会 Input.flush()，若此处直接 return 会吞掉顿帧期间的按键）
+    if (this.state === 'play' && this.hitStop > 0) {
+      this.hitStop -= dt
+      if (Input.pressed('shift') || Input.pressed(' ')) this.dashBuf = 0.18
+      if (Input.pressed('p') || Input.pressed('escape')) this.state = 'pause'
+      if (Input.pressed('m')) toggleMute()
+      return
+    }
     this.frameT += dt
     if (Input.pressed('m')) {
       const m = toggleMute()
@@ -222,6 +240,7 @@ export class Game {
     this.t += dt
     this.shake = Math.max(0, this.shake - dt * 3)
     this.invuln = Math.max(0, this.invuln - dt)
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 4)
 
     // 胜利判定
     if (this.t >= WIN_TIME) { this.endRun(true); return }
@@ -239,9 +258,12 @@ export class Game {
       mdx = dx / len; mdy = dy / len
       if (dx !== 0) this.face = dx > 0 ? 1 : -1
     }
-    // ---- 冲刺（主动技能，带无敌帧）----
+    // ---- 冲刺（主动技能，带无敌帧 + 输入缓冲）----
     this.dashCd = Math.max(0, this.dashCd - dt)
-    if (this.dashT <= 0 && this.dashCd <= 0 && (Input.pressed('shift') || Input.pressed(' '))) {
+    if (Input.pressed('shift') || Input.pressed(' ')) this.dashBuf = 0.18
+    this.dashBuf = Math.max(0, this.dashBuf - dt)
+    if (this.dashT <= 0 && this.dashCd <= 0 && this.dashBuf > 0) {
+      this.dashBuf = 0
       this.dashT = 0.18
       this.dashCd = 2.2
       this.dashX = this.moving ? mdx : this.face
@@ -322,6 +344,7 @@ export class Game {
   endRun(win: boolean) {
     this.win = win
     this.state = 'end'
+    this.hitStop = 0
     const time = Math.floor(this.t)
     this.newRecord = time > this.best.time || (win && this.best.wins === 0)
     this.best.time = Math.max(this.best.time, time)
@@ -417,7 +440,7 @@ export class Game {
         if (e.burnT <= 0) {
           e.burnT = 0.5
           e.burn--
-          this.damage(e, 5)
+          this.damage(e, 5, false) // 持续燃烧不暴击
           if (chance(0.5)) this.parts.push({ x: e.x + rand(-4, 4), y: e.y - 4, vx: rand(-8, 8), vy: -20, life: 0.4, maxLife: 0.4, color: '#ff7f3f', size: 1 })
         }
       }
@@ -796,8 +819,10 @@ export class Game {
         this.hp -= p.dmg
         this.invuln = 0.5
         this.shake = 0.4
+        this.hurtFlash = 1
+        this.hitStop = 0.06
         sfx.hurt()
-        this.float(this.px, this.py - 12, `-${Math.round(p.dmg)}`, '#ff4f6b')
+        this.float(this.px, this.py - 12, `-${Math.round(p.dmg)}`, '#ff4f6b', 9)
       }
     }
     this.eprojs = this.eprojs.filter(p => p.life > 0)
@@ -824,11 +849,20 @@ export class Game {
   }
 
   // ---------- 伤害 / 击杀 ----------
-  damage(e: Enemy, dmg: number) {
+  damage(e: Enemy, dmg: number, canCrit = true) {
     if (e.dead) return
-    e.hp -= dmg
-    e.flash = 0.08
-    this.float(e.x + rand(-4, 4), e.y - e.r - 4, String(Math.round(dmg)), '#ffd75e')
+    let d = dmg
+    const crit = canCrit && chance(this.critChance)
+    if (crit) d *= 2
+    e.hp -= d
+    e.flash = crit ? 0.14 : 0.08
+    if (crit) {
+      this.float(e.x + rand(-4, 4), e.y - e.r - 6, `${Math.round(d)}!`, '#ff9f4f', 11)
+      this.burst(e.x, e.y, '#ffcf6b', 5)
+      sfx.crit()
+    } else {
+      this.float(e.x + rand(-4, 4), e.y - e.r - 4, String(Math.round(d)), '#ffd75e')
+    }
     if (e.hp <= 0) this.kill(e)
   }
 
@@ -844,6 +878,7 @@ export class Game {
     if (e.kind === 'boss') {
       sfx.boom()
       this.shake = 1
+      this.hitStop = 0.22 // Boss 击杀重顿帧
       for (let i = 0; i < 12; i++) this.gems.push({ x: e.x + rand(-20, 20), y: e.y + rand(-20, 20), val: 5, vx: 0, vy: 0 })
       this.hearts.push({ x: e.x, y: e.y })
       this.float(e.x, e.y - 20, 'BOSS 被击败！', '#ffd75e')
@@ -851,6 +886,7 @@ export class Game {
     } else if (e.kind === 'elite') {
       sfx.boom()
       this.shake = 0.45
+      this.hitStop = 0.11 // 精英击杀轻顿帧
       for (let i = 0; i < 5; i++) this.gems.push({ x: e.x + rand(-12, 12), y: e.y + rand(-12, 12), val: 4, vx: 0, vy: 0 })
       this.hearts.push({ x: e.x, y: e.y })
       this.chests.push({ x: e.x + 14, y: e.y, opened: 0 }) // 精英掉宝箱
@@ -883,8 +919,10 @@ export class Game {
       this.hp -= h.dmg
       this.invuln = 0.8
       this.shake = 0.5
+      this.hurtFlash = 1
+      this.hitStop = 0.07 // 受击顿帧，强化"被打到"的实感
       sfx.hurt()
-      this.float(this.px, this.py - 12, `-${Math.round(h.dmg)}`, '#ff4f6b')
+      this.float(this.px, this.py - 12, `-${Math.round(h.dmg)}`, '#ff4f6b', 9)
     }
   }
 
@@ -947,7 +985,7 @@ export class Game {
   }
 
   // ---------- 升级三选一 ----------
-  openLevelUp() {
+  rollChoices() {
     const pool: Choice[] = []
     for (const def of UPG) {
       if (def.type === 'weapon') {
@@ -962,6 +1000,11 @@ export class Game {
     }
     this.choices = shuffle(pool).slice(0, 3)
     while (this.choices.length < 3) this.choices.push({ def: SNACK, lv: 1 })
+  }
+
+  openLevelUp() {
+    this.hitStop = 0 // 清掉残留顿帧，避免回到游戏后卡一下
+    this.rollChoices()
     this.state = 'levelup'
     sfx.levelup()
   }
@@ -977,6 +1020,13 @@ export class Game {
     if (Input.pressed('1')) sel = 0
     if (Input.pressed('2')) sel = 1
     if (Input.pressed('3')) sel = 2
+    // 重掷：不消耗本次升级，只换一批选项
+    if (Input.pressed('r') && this.rerolls > 0) {
+      this.rerolls--
+      this.rollChoices()
+      sfx.pickup()
+      return
+    }
     if (Input.mclick) {
       const idx = this.cardAt(Input.mx, Input.my)
       if (idx >= 0) sel = idx
@@ -1018,10 +1068,11 @@ export class Game {
   evolve(w: WeaponState) {
     w.evolved = true
     const evo = EVO[w.id]
-    this.float(this.px, this.py - 36, `武器进化：${evo.name}！`, '#ffd75e')
+    this.float(this.px, this.py - 36, `武器进化：${evo.name}！`, '#ffd75e', 11)
     this.burst(this.px, this.py, '#ffd75e', 24)
     sfx.win()
     this.shake = 0.6
+    this.hitStop = 0.12 // 进化顿帧（偏短：紧接升级菜单关闭，过长会像卡顿）
   }
 
   cardRects(): { x: number; y: number; w: number; h: number }[] {
@@ -1049,8 +1100,8 @@ export class Game {
     }
   }
 
-  float(x: number, y: number, txt: string, color: string) {
-    if (this.floats.length < 60) this.floats.push({ x, y, txt, life: 0.8, color })
+  float(x: number, y: number, txt: string, color: string, size = 7) {
+    if (this.floats.length < 60) this.floats.push({ x, y, txt, life: 0.8, color, size })
   }
 
   updateFx(dt: number) {
@@ -1260,14 +1311,27 @@ export class Game {
       g.fillRect(Math.round(W(p.x)), Math.round(H(p.y)), p.size, p.size)
     }
     g.globalAlpha = 1
-    g.font = '7px monospace'
     g.textAlign = 'center'
     for (const f of this.floats) {
       g.globalAlpha = clamp(f.life / 0.4, 0, 1)
+      g.font = `${f.size > 7 ? 'bold ' : ''}${f.size}px monospace`
       g.fillStyle = f.color
       g.fillText(f.txt, Math.round(W(f.x)), Math.round(H(f.y)))
     }
     g.globalAlpha = 1
+
+    // 受击红闪 + 濒死警示边框
+    if (this.hurtFlash > 0) {
+      g.fillStyle = `rgba(255,40,60,${this.hurtFlash * 0.32})`
+      g.fillRect(0, 0, VW, VH)
+    }
+    if (this.hp / this.maxHp < 0.25 && this.hp > 0) {
+      const pulse = 0.25 + Math.abs(Math.sin(this.frameT * 4)) * 0.35
+      g.strokeStyle = `rgba(255,60,80,${pulse})`
+      g.lineWidth = 6
+      g.strokeRect(3, 3, VW - 6, VH - 6)
+      g.lineWidth = 1
+    }
 
     this.drawHud()
 
@@ -1416,6 +1480,10 @@ export class Game {
     g.font = '9px monospace'
     g.fillStyle = '#9aa4c8'
     g.fillText('选择一项强化（点击 或 按 1 / 2 / 3）', VW / 2, 62)
+    // 重掷提示
+    g.font = '8px monospace'
+    g.fillStyle = this.rerolls > 0 ? '#57e6a0' : '#5c6285'
+    g.fillText(this.rerolls > 0 ? `按 R 重掷（剩 ${this.rerolls} 次）` : '重掷次数已用完', VW / 2, VH - 12)
 
     const rects = this.cardRects()
     this.choices.forEach((c, i) => {
@@ -1579,7 +1647,7 @@ export class Game {
     }
     g.font = '8px monospace'
     g.fillStyle = '#5c6285'
-    g.fillText('WASD 移动 · 武器自动攻击 · Space/Shift 冲刺 · 升级三选一', VW / 2, 242)
+    g.fillText('WASD 移动 · 武器自动攻击 · Space/Shift 冲刺 · 升级三选一 (R 重掷)', VW / 2, 242)
     g.fillText('坚持 5 分钟 · P 暂停 · M 静音', VW / 2, 255)
   }
 }

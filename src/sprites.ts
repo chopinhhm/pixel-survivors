@@ -241,4 +241,5 @@ export const SPR: Record<string, HTMLCanvasElement> = {
   ic_snack: emblem('#f0c090', '#ffeeda'),
   ic_boomer: emblem('#ffd75e', '#fff0b0'),
   ic_homing: emblem('#ff6b6b', '#ffd0d0'),
+  ic_crit: emblem('#ff9f4f', '#ffe0b0'),
 }

@@ -55,6 +55,7 @@ function noise(dur = 0.1, vol = 0.2) {
 export const sfx = {
   shoot() { tone(880, 0.06, 'square', 0.04, -500) },
   hit() { noise(0.04, 0.07) },
+  crit() { tone(1750, 0.07, 'square', 0.08, -700); noise(0.05, 0.09) },
   zap() { tone(1400, 0.1, 'sawtooth', 0.08, -1100); noise(0.06, 0.08) },
   nova() { tone(160, 0.25, 'triangle', 0.15, -80); noise(0.15, 0.1) },
   pickup() { tone(660, 0.05, 'sine', 0.07); tone(990, 0.06, 'sine', 0.07, 0, 0.05) },
