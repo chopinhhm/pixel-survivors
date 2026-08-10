@@ -1,8 +1,10 @@
-import { SPR, FLOOR } from './sprites'
+import { SPR, FLOOR, HUB_FLOOR } from './sprites'
 import { frame } from './assets'
 import { Input } from './input'
 import { sfx, toggleMute, isMuted } from './audio'
 import { clamp, rand, pick, chance, dist2, shuffle, fmtTime } from './util'
+import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, fmtMod, fmtStat, StatKey } from './items'
+import { Profile, loadProfile, saveProfile, INV_CAP } from './save'
 
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
 const ENEMY_DRAW_SCALE: Record<string, number> = { slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6 }
@@ -15,7 +17,14 @@ const BOSS_TIME = 240
 const ELITE_TIMES = [60, 140, 210]
 const SURGE_INTERVAL = 60 // 怪物狂潮周期
 
-type State = 'menu' | 'play' | 'levelup' | 'pause' | 'end'
+type State = 'menu' | 'hub' | 'inventory' | 'play' | 'levelup' | 'pause' | 'end'
+
+// ---------- 家园布局（世界坐标，玩家在家园从 0,0 出生）----------
+const HUB = { x0: -180, x1: 180, y0: -160, y1: 140 }
+const PORTAL = { x: 0, y: -118 }
+const STASH = { x: -96, y: 46 }
+const FORGE = { x: 96, y: 46 }
+const FORGE_COST = 60
 type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss'
 
 interface Enemy {
@@ -91,22 +100,23 @@ const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: number; r: n
   boss: { hp: 2600, spd: 24, dmg: 30, r: 14, xp: 60, scale: 2 },
 }
 
-interface Best { time: number; kills: number; wins: number }
-function loadBest(): Best {
-  try {
-    const raw = localStorage.getItem('pxsurv-best')
-    if (raw) return JSON.parse(raw)
-  } catch { /* ignore */ }
-  return { time: 0, kills: 0, wins: 0 }
-}
-
 export class Game {
   cv = document.createElement('canvas')
   g = this.cv.getContext('2d')!
   state: State = 'menu'
   win = false
   newRecord = false
-  best = loadBest()
+  profile: Profile = loadProfile()
+
+  // 本局战利品（结算时才并入档案）
+  runLoot: Item[] = []
+  runGold = 0
+  // 家园交互
+  hubMsg = ''
+  hubMsgT = 0
+  lootLost = 0 // 结算时因背包已满而丢失的件数
+  invHover = -1 // 背包格索引，-1 表示未悬停
+  eqHover: Slot | null = null
 
   t = 0
   kills = 0
@@ -169,14 +179,21 @@ export class Game {
     this.g.imageSmoothingEnabled = false
   }
 
-  // ---------- 派生属性 ----------
-  get spd() { return 72 * (1 + 0.1 * (this.passives.speed || 0)) }
-  get dmgMul() { return 1 + 0.12 * (this.passives.power || 0) }
-  get cdMul() { return Math.pow(0.92, this.passives.haste || 0) }
-  get magnetR() { return 28 * (1 + 0.45 * (this.passives.magnet || 0)) }
-  get xpMul() { return 1 + 0.15 * (this.passives.wisdom || 0) }
-  get regen() { return 0.6 * (this.passives.regen || 0) }
-  get critChance() { return 0.05 + 0.08 * (this.passives.crit || 0) }
+  // ---------- 派生属性（局内升级 × 局外装备）----------
+  // 装备属性缓存：critChance 等在 damage() 里每次命中都会读，
+  // 直接调 statTotal 会造成每帧数百次对象分配，故只在装备变动时重算
+  private eqCache: Record<StatKey, number> = statTotal(this.profile.eq)
+  get eq(): Record<StatKey, number> { return this.eqCache }
+  refreshEq() { this.eqCache = statTotal(this.profile.eq) }
+  get spd() { return 72 * (1 + 0.1 * (this.passives.speed || 0)) * (1 + this.eq.spd / 100) }
+  get dmgMul() { return (1 + 0.12 * (this.passives.power || 0)) * (1 + this.eq.dmg / 100) }
+  get cdMul() { return Math.pow(0.92, this.passives.haste || 0) * (1 - Math.min(0.5, this.eq.cdr / 100)) }
+  get magnetR() { return 28 * (1 + 0.45 * (this.passives.magnet || 0)) * (1 + this.eq.magnet / 100) }
+  get xpMul() { return (1 + 0.15 * (this.passives.wisdom || 0)) * (1 + this.eq.xp / 100) }
+  get regen() { return 0.6 * (this.passives.regen || 0) + this.eq.regen }
+  get critChance() { return 0.05 + 0.08 * (this.passives.crit || 0) + this.eq.crit / 100 }
+  /** 伤害减免，上限 60% 防止无敌 */
+  get armorMul() { return 1 - Math.min(0.6, this.eq.armor / 100) }
 
   // 鼠标在世界坐标中的位置（相机取整口径与 draw 保持一致）
   get aimX() { return Math.round(this.camX - VW / 2) + Input.mx }
@@ -192,7 +209,9 @@ export class Game {
     this.t = 0; this.kills = 0; this.shake = 0
     this.px = 0; this.py = 0
     this.camX = 0; this.camY = 0
-    this.maxHp = 100; this.hp = 100; this.invuln = 0
+    this.maxHp = 100 + this.eq.maxHp // 装备提供的生命上限
+    this.hp = this.maxHp; this.invuln = 0
+    this.runLoot = []; this.runGold = 0
     this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0; this.dashBuf = 0
     this.hitStop = 0; this.hurtFlash = 0; this.rerolls = 3
     this.level = 1; this.xp = 0; this.xpNext = 8; this.pendingLv = 0
@@ -225,10 +244,13 @@ export class Game {
     }
     switch (this.state) {
       case 'menu':
-        if (Input.pressed('enter') || Input.mclick) {
-          this.reset()
-          this.state = 'play'
-        }
+        if (Input.pressed('enter') || Input.mclick) this.enterHub()
+        break
+      case 'hub':
+        this.updateHub(dt)
+        break
+      case 'inventory':
+        this.updateInventory()
         break
       case 'play':
         if (Input.pressed('p') || Input.pressed('escape')) { this.state = 'pause'; break }
@@ -241,21 +263,14 @@ export class Game {
         this.updateLevelUp()
         break
       case 'end':
-        if (Input.pressed('r') || Input.pressed('enter') || Input.mclick) this.state = 'menu'
+        // 结算后回家，而不是回标题
+        if (Input.pressed('r') || Input.pressed('enter') || Input.mclick) this.enterHub()
         break
     }
   }
 
-  updatePlay(dt: number) {
-    this.t += dt
-    this.shake = Math.max(0, this.shake - dt * 3)
-    this.invuln = Math.max(0, this.invuln - dt)
-    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 4)
-
-    // 胜利判定
-    if (this.t >= WIN_TIME) { this.endRun(true); return }
-
-    // ---- 移动 ----
+  /** 移动 + 冲刺 + 相机，家园和地牢共用 */
+  movePlayer(dt: number) {
     let dx = 0, dy = 0
     if (Input.down('w') || Input.down('arrowup')) dy -= 1
     if (Input.down('s') || Input.down('arrowdown')) dy += 1
@@ -286,7 +301,6 @@ export class Game {
       this.dashT -= dt
       this.px += this.dashX * 260 * dt
       this.py += this.dashY * 260 * dt
-      // 冲刺拖尾
       if (chance(0.7)) this.parts.push({ x: this.px, y: this.py, vx: 0, vy: 0, life: 0.25, maxLife: 0.25, color: '#57c7ff', size: 2 })
     } else if (this.moving) {
       this.px += mdx * this.spd * dt
@@ -298,6 +312,80 @@ export class Game {
     const ck = 1 - Math.exp(-dt * 7.5)
     this.camX += (this.px + mdx * lead - this.camX) * ck
     this.camY += (this.py + mdy * lead - this.camY) * ck
+  }
+
+  // ---------- 家园：安全区，传送门出发 / 储物箱管理背包 / 熔炉花金币 ----------
+  enterHub() {
+    this.state = 'hub'
+    this.px = 0; this.py = 0
+    this.camX = 0; this.camY = 0
+    this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
+    this.hitStop = 0; this.hurtFlash = 0; this.invuln = 0
+    this.parts = []; this.floats = []
+    this.hp = this.maxHp = 100 + this.eq.maxHp
+  }
+
+  hubSay(msg: string) { this.hubMsg = msg; this.hubMsgT = 2.2 }
+
+  updateHub(dt: number) {
+    this.hubMsgT = Math.max(0, this.hubMsgT - dt)
+    this.movePlayer(dt)
+    // 限制在房间内
+    this.px = clamp(this.px, HUB.x0 + 12, HUB.x1 - 12)
+    this.py = clamp(this.py, HUB.y0 + 12, HUB.y1 - 12)
+    this.updateFx(dt)
+
+    const nearPortal = dist2(this.px, this.py, PORTAL.x, PORTAL.y) < 26 * 26
+    const nearStash = dist2(this.px, this.py, STASH.x, STASH.y) < 24 * 24
+    const nearForge = dist2(this.px, this.py, FORGE.x, FORGE.y) < 24 * 24
+
+    // 传送门粒子
+    if (chance(0.5)) {
+      const a = rand(Math.PI * 2)
+      this.parts.push({
+        x: PORTAL.x + Math.cos(a) * 16, y: PORTAL.y + Math.sin(a) * 16,
+        vx: -Math.cos(a) * 22, vy: -Math.sin(a) * 22,
+        life: 0.6, maxLife: 0.6, color: chance(0.5) ? '#9f6bff' : '#57c7ff', size: 1,
+      })
+    }
+
+    if (Input.pressed('i')) { this.state = 'inventory'; return }
+    if (Input.pressed('e')) {
+      if (nearPortal) {
+        this.reset()
+        this.state = 'play'
+        sfx.boss()
+      } else if (nearStash) {
+        this.state = 'inventory'
+      } else if (nearForge) {
+        if (this.profile.gold < FORGE_COST) {
+          this.hubSay(`金币不足（需要 ${FORGE_COST}）`)
+        } else if (this.profile.inv.length >= INV_CAP) {
+          this.hubSay('背包已满，先去储物箱整理')
+        } else {
+          this.profile.gold -= FORGE_COST
+          // 通关次数越多，锻造出的装备越好
+          const it = rollItem(this.profile.uidSeq++, Math.min(30, this.profile.runs * 2))
+          this.profile.inv.push(it)
+          saveProfile(this.profile)
+          this.hubSay(`锻造出：${it.name}（${RARITY[it.rarity].name}）`)
+          this.burst(FORGE.x, FORGE.y, RARITY[it.rarity].color, 18)
+          sfx.levelup()
+        }
+      }
+    }
+  }
+
+  updatePlay(dt: number) {
+    this.t += dt
+    this.shake = Math.max(0, this.shake - dt * 3)
+    this.invuln = Math.max(0, this.invuln - dt)
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 4)
+
+    // 胜利判定
+    if (this.t >= WIN_TIME) { this.endRun(true); return }
+
+    this.movePlayer(dt)
 
     // 回复
     if (this.regen > 0) this.hp = Math.min(this.maxHp, this.hp + this.regen * dt)
@@ -356,11 +444,20 @@ export class Game {
     this.state = 'end'
     this.hitStop = 0
     const time = Math.floor(this.t)
-    this.newRecord = time > this.best.time || (win && this.best.wins === 0)
-    this.best.time = Math.max(this.best.time, time)
-    this.best.kills = Math.max(this.best.kills, this.kills)
-    if (win) this.best.wins++
-    try { localStorage.setItem('pxsurv-best', JSON.stringify(this.best)) } catch { /* ignore */ }
+    const best = this.profile.best
+    this.newRecord = time > best.time || (win && best.wins === 0)
+    best.time = Math.max(best.time, time)
+    best.kills = Math.max(best.kills, this.kills)
+    if (win) best.wins++
+    this.profile.runs++
+    // 战利品带回家：即使阵亡也保留，保证每次出门都有收获
+    this.profile.gold += this.runGold
+    this.lootLost = 0
+    for (const it of this.runLoot) {
+      if (this.profile.inv.length < INV_CAP) this.profile.inv.push(it)
+      else this.lootLost++ // 背包满，明确告知玩家有东西没带回来
+    }
+    saveProfile(this.profile)
     if (win) sfx.win()
     else sfx.lose()
   }
@@ -825,7 +922,7 @@ export class Game {
       if (p.life <= 0) continue
       if (this.invuln <= 0 && dist2(p.x, p.y, this.px, this.py) < (p.r + 5) ** 2) {
         p.life = 0
-        this.hp -= p.dmg
+        this.hp -= p.dmg * this.armorMul
         this.invuln = 0.5
         this.shake = 0.4
         this.hurtFlash = 1
@@ -883,6 +980,11 @@ export class Game {
     this.kills++
     const colors: Record<EnemyKind, string> = { slime: '#5ac54f', bat: '#7b5be0', skel: '#e6e6f0', elite: '#e05a4f', boss: '#b13e53' }
     this.burst(e.x, e.y, colors[e.kind], e.kind === 'boss' ? 45 : e.kind === 'elite' ? 22 : 9)
+    // 金币与装备掉落
+    this.runGold += e.kind === 'boss' ? 120 : e.kind === 'elite' ? 30 : 1
+    if (e.kind === 'boss') { this.dropLoot(e.x, e.y, 2, 35) }
+    else if (e.kind === 'elite') { this.dropLoot(e.x, e.y, 1, 18) }
+    else if (chance(0.012)) { this.dropLoot(e.x, e.y, 1, 0) }
     // 掉落
     if (e.kind === 'boss') {
       sfx.boom()
@@ -917,6 +1019,18 @@ export class Game {
     }
   }
 
+  /** 掉落装备到本局战利品；背包满了也照收，结算时再按容量并入 */
+  dropLoot(x: number, y: number, n: number, luck: number) {
+    for (let i = 0; i < n; i++) {
+      const it = rollItem(this.profile.uidSeq++, luck)
+      this.runLoot.push(it)
+      const col = RARITY[it.rarity].color
+      this.float(x + rand(-6, 6), y - 18 - i * 10, `${it.name}`, col, it.rarity >= 2 ? 10 : 8)
+      this.burst(x, y, col, it.rarity >= 2 ? 16 : 8)
+      if (it.rarity >= 2) sfx.levelup()
+    }
+  }
+
   checkPlayerHit() {
     if (this.invuln > 0) return
     let hit: Enemy | null = null
@@ -925,7 +1039,7 @@ export class Game {
     })
     if (hit) {
       const h = hit as Enemy
-      this.hp -= h.dmg
+      this.hp -= h.dmg * this.armorMul
       this.invuln = 0.8
       this.shake = 0.5
       this.hurtFlash = 1
@@ -1101,6 +1215,217 @@ export class Game {
     return -1
   }
 
+  // ================================================================
+  // 背包 / 装备
+  // ================================================================
+  /** 装备格位置（左侧竖排） */
+  eqRects(): { slot: Slot; x: number; y: number; s: number }[] {
+    const s = 34, x = 46, y0 = 96
+    return SLOTS.map((slot, i) => ({ slot, x, y: y0 + i * (s + 8), s }))
+  }
+
+  /** 背包格位置（右侧 6×4 网格） */
+  invRects(): { x: number; y: number; s: number }[] {
+    const s = 34, gap = 5, cols = 6, x0 = 178, y0 = 96
+    return Array.from({ length: INV_CAP }, (_, i) => ({
+      x: x0 + (i % cols) * (s + gap),
+      y: y0 + Math.floor(i / cols) * (s + gap),
+      s,
+    }))
+  }
+
+  hitCell(rects: { x: number; y: number; s: number }[], mx: number, my: number): number {
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i]
+      if (mx >= r.x && mx <= r.x + r.s && my >= r.y && my <= r.y + r.s) return i
+    }
+    return -1
+  }
+
+  updateInventory() {
+    const inv = this.profile.inv
+    const eqR = this.eqRects()
+    const invR = this.invRects()
+    this.invHover = this.hitCell(invR, Input.mx, Input.my)
+    const eqIdx = this.hitCell(eqR, Input.mx, Input.my)
+    this.eqHover = eqIdx >= 0 ? eqR[eqIdx].slot : null
+
+    if (Input.pressed('escape') || Input.pressed('i')) {
+      saveProfile(this.profile)
+      this.state = 'hub'
+      return
+    }
+
+    if (Input.mclick) {
+      // 点背包里的装备 → 穿上（替换下来的回到背包）
+      if (this.invHover >= 0 && this.invHover < inv.length) {
+        const it = inv[this.invHover]
+        const old = this.profile.eq[it.slot]
+        this.profile.eq[it.slot] = it
+        inv.splice(this.invHover, 1)
+        if (old) inv.push(old) // 换下的回背包，总数不增，不会溢出
+        this.refreshEq()
+        saveProfile(this.profile)
+        sfx.pickup()
+      } else if (this.eqHover) {
+        // 点已装备的 → 脱下
+        const it = this.profile.eq[this.eqHover]
+        if (it) {
+          if (inv.length >= INV_CAP) {
+            this.hubSay('背包已满，无法卸下')
+          } else {
+            this.profile.eq[this.eqHover] = null
+            inv.push(it)
+            this.refreshEq()
+            saveProfile(this.profile)
+            sfx.pickup()
+          }
+        }
+      }
+    }
+  }
+
+  /** 画一件装备的图标：稀有度描边 + 部位图形 */
+  drawItemIcon(x: number, y: number, s: number, it: Item) {
+    const g = this.g
+    const col = RARITY[it.rarity].color
+    g.fillStyle = 'rgba(23,26,46,0.9)'
+    g.fillRect(x, y, s, s)
+    g.strokeStyle = col
+    g.lineWidth = it.rarity >= 2 ? 2 : 1
+    g.strokeRect(x + 0.5, y + 0.5, s - 1, s - 1)
+    g.lineWidth = 1
+    const cx = x + s / 2, cy = y + s / 2
+    g.fillStyle = col
+    g.strokeStyle = col
+    switch (it.slot) {
+      case 'weapon': // 剑
+        g.fillRect(cx - 1, cy - 9, 2, 13)
+        g.fillRect(cx - 5, cy + 3, 10, 2)
+        g.fillRect(cx - 1, cy + 5, 2, 4)
+        break
+      case 'armor': // 盾
+        g.beginPath()
+        g.moveTo(cx, cy - 9); g.lineTo(cx + 7, cy - 5)
+        g.lineTo(cx + 5, cy + 6); g.lineTo(cx, cy + 9)
+        g.lineTo(cx - 5, cy + 6); g.lineTo(cx - 7, cy - 5)
+        g.closePath(); g.stroke()
+        break
+      case 'ring': // 戒指
+        g.beginPath(); g.arc(cx, cy + 2, 5, 0, Math.PI * 2); g.stroke()
+        g.fillRect(cx - 2, cy - 8, 4, 4)
+        break
+      case 'amulet': // 护符
+        g.beginPath(); g.arc(cx, cy - 4, 6, Math.PI * 0.15, Math.PI * 0.85, true); g.stroke()
+        g.beginPath()
+        g.moveTo(cx, cy + 1); g.lineTo(cx + 4, cy + 5)
+        g.lineTo(cx, cy + 9); g.lineTo(cx - 4, cy + 5)
+        g.closePath(); g.fill()
+        break
+    }
+  }
+
+  /** 装备详情浮窗 */
+  drawItemTip(it: Item, mx: number, my: number, compare: Item | null) {
+    const g = this.g
+    const lines = it.mods.map(fmtMod)
+    const w = 132
+    const h = 30 + lines.length * 11 + (compare ? 12 : 0)
+    // 贴边翻转，避免超出画布
+    const x = clamp(mx + 12, 2, VW - w - 2)
+    const y = clamp(my + 8, 2, VH - h - 2)
+    g.fillStyle = 'rgba(7,7,13,0.94)'
+    g.fillRect(x, y, w, h)
+    g.strokeStyle = RARITY[it.rarity].color
+    g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
+    g.textAlign = 'left'
+    g.font = 'bold 9px monospace'
+    g.fillStyle = RARITY[it.rarity].color
+    g.fillText(it.name, x + 6, y + 14)
+    g.font = '7px monospace'
+    g.fillStyle = '#9aa4c8'
+    g.fillText(`${RARITY[it.rarity].name} · ${SLOT_NAME[it.slot]}`, x + 6, y + 25)
+    g.fillStyle = '#57e6a0'
+    lines.forEach((l, i) => g.fillText(l, x + 6, y + 37 + i * 11))
+    if (compare) {
+      const d = itemScore(it) - itemScore(compare)
+      g.fillStyle = d > 0 ? '#57e6a0' : d < 0 ? '#ff6b6b' : '#9aa4c8'
+      g.fillText(d > 0 ? '▲ 强于当前装备' : d < 0 ? '▼ 弱于当前装备' : '≈ 与当前相当', x + 6, y + h - 8)
+    }
+  }
+
+  drawInventory() {
+    const g = this.g
+    g.fillStyle = 'rgba(7,7,13,0.93)'
+    g.fillRect(0, 0, VW, VH)
+    g.textAlign = 'center'
+    g.font = 'bold 15px monospace'
+    g.fillStyle = '#ffd75e'
+    g.fillText('背 包', VW / 2, 34)
+    g.font = '8px monospace'
+    g.fillStyle = '#9aa4c8'
+    g.fillText('点击背包中的装备穿戴 · 点击已装备的卸下 · ESC / I 返回', VW / 2, 50)
+
+    // 金币
+    g.textAlign = 'right'
+    g.font = 'bold 10px monospace'
+    g.fillStyle = '#ffd75e'
+    g.fillText(`金币 ${this.profile.gold}`, VW - 14, 34)
+
+    // ---- 左侧：已装备 ----
+    g.textAlign = 'left'
+    g.font = '9px monospace'
+    g.fillStyle = '#ffffff'
+    g.fillText('已装备', 46, 86)
+    const eqR = this.eqRects()
+    for (const r of eqR) {
+      const it = this.profile.eq[r.slot]
+      g.fillStyle = 'rgba(23,26,46,0.7)'
+      g.fillRect(r.x, r.y, r.s, r.s)
+      g.strokeStyle = this.eqHover === r.slot ? '#ffd75e' : '#3a3f66'
+      g.strokeRect(r.x + 0.5, r.y + 0.5, r.s - 1, r.s - 1)
+      if (it) this.drawItemIcon(r.x, r.y, r.s, it)
+      g.font = '7px monospace'
+      g.fillStyle = '#5c6285'
+      g.textAlign = 'left'
+      g.fillText(SLOT_NAME[r.slot], r.x + r.s + 6, r.y + r.s / 2 + 3)
+    }
+
+    // ---- 右侧：背包网格 ----
+    g.font = '9px monospace'
+    g.fillStyle = '#ffffff'
+    g.fillText(`背包 ${this.profile.inv.length}/${INV_CAP}`, 178, 86)
+    const invR = this.invRects()
+    for (let i = 0; i < invR.length; i++) {
+      const r = invR[i]
+      const it = this.profile.inv[i]
+      g.fillStyle = 'rgba(23,26,46,0.7)'
+      g.fillRect(r.x, r.y, r.s, r.s)
+      g.strokeStyle = this.invHover === i && it ? '#ffd75e' : '#2a2e4a'
+      g.strokeRect(r.x + 0.5, r.y + 0.5, r.s - 1, r.s - 1)
+      if (it) this.drawItemIcon(r.x, r.y, r.s, it)
+    }
+
+    // ---- 底部：属性总览 ----
+    const st = this.eq
+    const active = (Object.keys(st) as StatKey[]).filter(k => st[k] > 0)
+    g.textAlign = 'center'
+    g.font = '8px monospace'
+    g.fillStyle = '#57c7ff'
+    g.fillText(
+      active.length ? '装备总加成：' + active.map(k => fmtStat(k, st[k])).join('  ') : '尚未装备任何东西',
+      VW / 2, VH - 22,
+    )
+
+    // ---- 浮窗（最后画，保证在最上层）----
+    if (this.invHover >= 0 && this.profile.inv[this.invHover]) {
+      const it = this.profile.inv[this.invHover]
+      this.drawItemTip(it, Input.mx, Input.my, this.profile.eq[it.slot])
+    } else if (this.eqHover && this.profile.eq[this.eqHover]) {
+      this.drawItemTip(this.profile.eq[this.eqHover]!, Input.mx, Input.my, null)
+    }
+  }
+
   // ---------- 特效 ----------
   burst(x: number, y: number, color: string, n: number) {
     for (let i = 0; i < n && this.parts.length < 300; i++) {
@@ -1133,6 +1458,8 @@ export class Game {
     const g = this.g
     g.imageSmoothingEnabled = false
     if (this.state === 'menu') { this.drawMenu(); return }
+    if (this.state === 'hub') { this.drawHub(); return }
+    if (this.state === 'inventory') { this.drawHub(); this.drawInventory(); return }
 
     // 相机（含震动）
     const sx = this.shake > 0 ? rand(-3, 3) * this.shake : 0
@@ -1462,6 +1789,7 @@ export class Game {
     g.font = '8px monospace'
     g.fillStyle = '#ffd75e'
     g.fillText(`击杀 ${this.kills}`, VW - 4, 16)
+    g.fillText(`金币 ${this.runGold}${this.runLoot.length ? ` · 战利品 ${this.runLoot.length}` : ''}`, VW - 4, 27)
     // HP 条
     const hw = 70
     g.fillStyle = '#171a2e'
@@ -1641,24 +1969,163 @@ export class Game {
       g.fillStyle = '#ff4f6b'
       g.fillText('你倒下了……', cx, y)
     }
-    y = VH * 0.44
+    y = VH * 0.38
     g.font = '10px monospace'
     g.fillStyle = '#ffffff'
-    g.fillText(`存活时间  ${fmtTime(this.t)}`, cx, y); y += 17
-    g.fillText(`击杀数    ${this.kills}`, cx, y); y += 17
-    g.fillText(`等级      Lv ${this.level}`, cx, y); y += 17
+    g.fillText(`存活 ${fmtTime(this.t)}  ·  击杀 ${this.kills}  ·  Lv ${this.level}`, cx, y); y += 16
     const evoCount = this.weapons.filter(w => w.evolved).length
     if (evoCount > 0) {
       g.fillStyle = '#ffd75e'
-      g.fillText(`武器进化  ${evoCount} 件`, cx, y); y += 17
+      g.font = '9px monospace'
+      g.fillText(`武器进化 ${evoCount} 件`, cx, y); y += 14
     }
     if (this.newRecord) {
       g.fillStyle = '#57e6a0'
-      g.fillText('★ 新纪录！', cx, y)
+      g.font = '9px monospace'
+      g.fillText('★ 新纪录！', cx, y); y += 14
+    }
+    // 本次收获
+    g.fillStyle = '#ffd75e'
+    g.font = '10px monospace'
+    g.fillText(`获得金币 ${this.runGold}`, cx, y); y += 16
+    if (this.runLoot.length) {
+      g.fillStyle = '#ffffff'
+      g.font = '9px monospace'
+      g.fillText(`战利品 ${this.runLoot.length} 件`, cx, y); y += 12
+      g.font = '8px monospace'
+      for (const it of this.runLoot.slice(0, 3)) {
+        g.fillStyle = RARITY[it.rarity].color
+        g.fillText(`${it.name}（${RARITY[it.rarity].name}）`, cx, y); y += 10
+      }
+      if (this.runLoot.length > 3) {
+        g.fillStyle = '#9aa4c8'
+        g.fillText(`…等共 ${this.runLoot.length} 件`, cx, y); y += 10
+      }
+    }
+    if (this.lootLost > 0) {
+      g.fillStyle = '#ff6b6b'
+      g.font = '8px monospace'
+      g.fillText(`⚠ 背包已满，${this.lootLost} 件战利品被丢弃`, cx, y)
     }
     g.fillStyle = '#9aa4c8'
     g.font = '9px monospace'
-    if (Math.floor(this.frameT * 2) % 2 === 0) g.fillText('按 R 或点击 返回标题', cx, VH * 0.86)
+    if (Math.floor(this.frameT * 2) % 2 === 0) g.fillText('按 R 或点击 回家', cx, VH * 0.9)
+  }
+
+  // ---------- 家园场景 ----------
+  drawHub() {
+    const g = this.g
+    const cx = Math.round(this.camX - VW / 2)
+    const cy = Math.round(this.camY - VH / 2)
+    const W = (wx: number) => wx - cx
+    const H = (wy: number) => wy - cy
+
+    // 木地板（房间内）+ 房间外的暗色虚空
+    g.fillStyle = '#0a0a12'
+    g.fillRect(0, 0, VW, VH)
+    const ts = 16
+    for (let wy = Math.floor(HUB.y0 / ts) * ts; wy < HUB.y1; wy += ts) {
+      for (let wx = Math.floor(HUB.x0 / ts) * ts; wx < HUB.x1; wx += ts) {
+        const h = ((wx * 73856093) ^ (wy * 19349663)) >>> 0
+        g.drawImage(HUB_FLOOR[h % HUB_FLOOR.length], W(wx), H(wy))
+      }
+    }
+    // 墙体边框
+    g.strokeStyle = '#2a1d15'
+    g.lineWidth = 6
+    g.strokeRect(W(HUB.x0) - 3, H(HUB.y0) - 3, HUB.x1 - HUB.x0 + 6, HUB.y1 - HUB.y0 + 6)
+    g.strokeStyle = '#6b4d39'
+    g.lineWidth = 2
+    g.strokeRect(W(HUB.x0), H(HUB.y0), HUB.x1 - HUB.x0, HUB.y1 - HUB.y0)
+    g.lineWidth = 1
+
+    // ---- 传送门（旋转光环）----
+    const pt = this.frameT
+    this.glow(W(PORTAL.x), H(PORTAL.y), 34, '#9f6bff', 0.55)
+    for (let i = 0; i < 3; i++) {
+      const rr = 12 + i * 5 + Math.sin(pt * 2 + i) * 2
+      g.strokeStyle = `rgba(${120 + i * 40},${100 + i * 30},255,${0.8 - i * 0.2})`
+      g.lineWidth = 2
+      g.beginPath()
+      g.arc(W(PORTAL.x), H(PORTAL.y), rr, pt * (1.4 + i * 0.5), pt * (1.4 + i * 0.5) + Math.PI * 1.4)
+      g.stroke()
+    }
+    g.lineWidth = 1
+    g.fillStyle = 'rgba(30,10,60,0.85)'
+    g.beginPath(); g.arc(W(PORTAL.x), H(PORTAL.y), 11, 0, Math.PI * 2); g.fill()
+
+    // ---- 储物箱 / 熔炉 ----
+    this.shadow(W(STASH.x), H(STASH.y) + 8, 9)
+    g.drawImage(frame('chest', 0), Math.round(W(STASH.x) - 8), Math.round(H(STASH.y) - 8))
+    this.shadow(W(FORGE.x), H(FORGE.y) + 8, 9)
+    this.glow(W(FORGE.x), H(FORGE.y) + 2, 14, '#ff7f3f', 0.4 + Math.sin(pt * 3) * 0.1)
+    g.fillStyle = '#3a3a52'
+    g.fillRect(Math.round(W(FORGE.x) - 9), Math.round(H(FORGE.y) - 4), 18, 12)
+    g.fillStyle = '#ff7f3f'
+    g.fillRect(Math.round(W(FORGE.x) - 5), Math.round(H(FORGE.y) - 1), 10, 5)
+    g.fillStyle = '#ffd75e'
+    g.fillRect(Math.round(W(FORGE.x) - 3), Math.round(H(FORGE.y) + 1), 6, 3)
+
+    // ---- 粒子 ----
+    for (const p of this.parts) {
+      g.globalAlpha = p.life / p.maxLife
+      g.fillStyle = p.color
+      g.fillRect(Math.round(W(p.x)), Math.round(H(p.y)), p.size, p.size)
+    }
+    g.globalAlpha = 1
+
+    // ---- 玩家 ----
+    const key = this.moving || this.dashT > 0 ? 'player_run' : 'player_idle'
+    const pf = Math.floor(this.frameT * (this.moving ? 12 : 5)) % 4
+    this.shadow(W(this.px), H(this.py) + 13, 6)
+    g.drawImage(frame(key, pf, this.face < 0) as CanvasImageSource, Math.round(W(this.px) - 8), Math.round(H(this.py) - 14))
+
+    // ---- 交互标签 ----
+    g.textAlign = 'center'
+    const label = (wx: number, wy: number, txt: string, near: boolean, color: string) => {
+      g.font = near ? 'bold 9px monospace' : '8px monospace'
+      g.fillStyle = near ? color : '#5c6285'
+      g.fillText(txt, Math.round(W(wx)), Math.round(H(wy)))
+      if (near) {
+        g.font = '8px monospace'
+        g.fillStyle = '#ffffff'
+        g.fillText('按 E', Math.round(W(wx)), Math.round(H(wy)) + 11)
+      }
+    }
+    const nearPortal = dist2(this.px, this.py, PORTAL.x, PORTAL.y) < 26 * 26
+    const nearStash = dist2(this.px, this.py, STASH.x, STASH.y) < 24 * 24
+    const nearForge = dist2(this.px, this.py, FORGE.x, FORGE.y) < 24 * 24
+    label(PORTAL.x, PORTAL.y - 26, '传送门 · 出发冒险', nearPortal, '#b98cff')
+    label(STASH.x, STASH.y - 18, '储物箱 · 背包', nearStash, '#57c7ff')
+    label(FORGE.x, FORGE.y - 18, `熔炉 · 锻造(${FORGE_COST}金)`, nearForge, '#ff9f4f')
+
+    // ---- HUD ----
+    g.textAlign = 'left'
+    g.font = 'bold 10px monospace'
+    g.fillStyle = '#ffd75e'
+    g.fillText(`金币 ${this.profile.gold}`, 8, 18)
+    g.font = '8px monospace'
+    g.fillStyle = '#9aa4c8'
+    g.fillText(`冒险次数 ${this.profile.runs} · 背包 ${this.profile.inv.length}/${INV_CAP}`, 8, 31)
+    const st = this.eq
+    const active = (Object.keys(st) as StatKey[]).filter(k => st[k] > 0)
+    if (active.length) {
+      g.fillStyle = '#57e6a0'
+      g.fillText('装备加成 ' + active.map(k => fmtStat(k, st[k])).join(' '), 8, 44)
+    }
+    g.textAlign = 'right'
+    g.fillStyle = '#5c6285'
+    g.fillText('WASD 移动 · E 交互 · I 背包', VW - 8, 18)
+
+    // 家园提示消息
+    if (this.hubMsgT > 0) {
+      g.textAlign = 'center'
+      g.globalAlpha = clamp(this.hubMsgT / 0.5, 0, 1)
+      g.font = 'bold 10px monospace'
+      g.fillStyle = '#ffd75e'
+      g.fillText(this.hubMsg, VW / 2, VH - 26)
+      g.globalAlpha = 1
+    }
   }
 
   drawMenu() {
@@ -1700,21 +2167,22 @@ export class Game {
       fx += 20
     }
     // 最佳纪录
-    if (this.best.time > 0) {
+    if (this.profile.best.time > 0) {
       g.fillStyle = '#9aa4c8'
       g.font = '8px monospace'
-      const wins = this.best.wins > 0 ? ` · 通关 ${this.best.wins} 次` : ''
-      g.fillText(`最佳纪录  存活 ${fmtTime(this.best.time)} · 击杀 ${this.best.kills}${wins}`, VW / 2, VH * 0.71)
+      const b = this.profile.best
+      const wins = b.wins > 0 ? ` · 通关 ${b.wins} 次` : ''
+      g.fillText(`最佳纪录  存活 ${fmtTime(b.time)} · 击杀 ${b.kills}${wins}`, VW / 2, VH * 0.71)
     }
     // 开始提示（闪烁）
     if (Math.floor(this.frameT * 2) % 2 === 0) {
       g.font = 'bold 11px monospace'
       g.fillStyle = '#ffffff'
-      g.fillText('点击 或 按 Enter 开始', VW / 2, VH * 0.80)
+      g.fillText('点击 或 按 Enter 进入家园', VW / 2, VH * 0.80)
     }
     g.font = '8px monospace'
     g.fillStyle = '#5c6285'
-    g.fillText('WASD 移动 · 鼠标瞄准 · Space/Shift 冲刺 · 升级三选一 (R 重掷)', VW / 2, VH * 0.90)
+    g.fillText('家园出发 · 传送门冒险 · 掉落装备带回家变强', VW / 2, VH * 0.90)
     g.fillText('坚持 5 分钟 · P 暂停 · M 静音', VW / 2, VH * 0.945)
   }
 }

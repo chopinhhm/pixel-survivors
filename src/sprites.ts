@@ -254,6 +254,40 @@ function floorTile(seed: number): HTMLCanvasElement {
 
 export const FLOOR: HTMLCanvasElement[] = Array.from({ length: 12 }, (_, i) => floorTile(i + 1))
 
+// 家园地板：暖色木板，和冰冷的地牢石砖形成对比
+function hubTile(seed: number): HTMLCanvasElement {
+  const c = document.createElement('canvas')
+  c.width = 16
+  c.height = 16
+  const g = c.getContext('2d')!
+  let s = (seed * 40503 + 7919) >>> 0
+  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296)
+
+  g.fillStyle = '#5a4030'
+  g.fillRect(0, 0, 16, 16)
+  // 木纹
+  for (let i = 0; i < 30; i++) {
+    const x = Math.floor(rnd() * 16), y = Math.floor(rnd() * 16)
+    g.fillStyle = rnd() > 0.5 ? '#654836' : '#4f382a'
+    g.fillRect(x, y, 1 + Math.floor(rnd() * 3), 1)
+  }
+  // 木板横缝
+  g.fillStyle = '#3c2a1f'
+  g.fillRect(0, 0, 16, 1)
+  g.fillRect(0, 8, 16, 1)
+  g.fillStyle = '#6b4d39'
+  g.fillRect(0, 1, 16, 1)
+  g.fillRect(0, 9, 16, 1)
+  // 错缝的竖向接头
+  g.fillStyle = '#3c2a1f'
+  const jx = seed % 2 === 0 ? 4 : 11
+  g.fillRect(jx, 1, 1, 7)
+  g.fillRect((jx + 8) % 16, 9, 1, 7)
+  return c
+}
+
+export const HUB_FLOOR: HTMLCanvasElement[] = Array.from({ length: 8 }, (_, i) => hubTile(i + 1))
+
 // ---------- 导出 ----------
 const hero1 = sprite(heroRows1, heroPal)
 const hero2 = sprite(heroRows2, heroPal)
