@@ -25,7 +25,7 @@ export const RARITY = [
 
 export const STAT_NAME: Record<StatKey, string> = {
   maxHp: '生命上限', dmg: '伤害', spd: '移速', crit: '暴击率',
-  cdr: '冷却缩减', magnet: '拾取范围', xp: '经验获取', armor: '伤害减免', regen: '生命回复',
+  cdr: '冷却缩减', magnet: '拾取范围', xp: '金币获取', armor: '伤害减免', regen: '生命回复',
 }
 // 是否以百分比展示
 const STAT_PCT: Record<StatKey, boolean> = {

@@ -2,9 +2,10 @@ import { SPR, FLOOR, HUB_FLOOR } from './sprites'
 import { frame } from './assets'
 import { Input } from './input'
 import { sfx, toggleMute, isMuted } from './audio'
-import { clamp, rand, pick, chance, dist2, shuffle, fmtTime } from './util'
+import { clamp, rand, pick, chance, dist2, fmtTime } from './util'
 import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, fmtMod, fmtStat, StatKey } from './items'
 import { Profile, loadProfile, saveProfile, INV_CAP } from './save'
+import { Floor, RoomDef, Dir, DIRS, DIR_LIST, genFloor, rkey, hasDoor } from './rooms'
 
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
 const ENEMY_DRAW_SCALE: Record<string, number> = { slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6 }
@@ -12,12 +13,15 @@ const ENEMY_DRAW_SCALE: Record<string, number> = { slime: 1, bat: 1, skel: 1, el
 export const VW = 640
 export const VH = 360
 
-const WIN_TIME = 300 // 坚持 5 分钟胜利
-const BOSS_TIME = 240
-const ELITE_TIMES = [60, 140, 210]
-const SURGE_INTERVAL = 60 // 怪物狂潮周期
+// ---------- 房间尺寸与画布定位（相机固定，一屏一间）----------
+export const ROOM_W = 576
+export const ROOM_H = 286
+const OX = 32 // 房间在画布上的左上角
+const OY = 52
+const DOOR_HALF = 26 // 门洞半宽
+const WALL = 10
 
-type State = 'menu' | 'hub' | 'inventory' | 'play' | 'levelup' | 'pause' | 'end'
+type State = 'menu' | 'hub' | 'inventory' | 'play' | 'pause' | 'end'
 
 // ---------- 家园布局（世界坐标，玩家在家园从 0,0 出生）----------
 const HUB = { x0: -180, x1: 180, y0: -160, y1: 140 }
@@ -84,7 +88,7 @@ const UPG: UpDef[] = [
   { id: 'power', type: 'passive', maxLv: 5, name: '力量护符', desc: '所有伤害 +12%', icon: 'ic_power' },
   { id: 'haste', type: 'passive', maxLv: 5, name: '急速手环', desc: '攻击冷却 -8%', icon: 'ic_haste' },
   { id: 'magnet', type: 'passive', maxLv: 5, name: '磁力戒指', desc: '拾取范围 +45%', icon: 'ic_magnet' },
-  { id: 'wisdom', type: 'passive', maxLv: 5, name: '智慧之书', desc: '经验获取 +15%', icon: 'ic_wisdom' },
+  { id: 'wisdom', type: 'passive', maxLv: 5, name: '贪婪之书', desc: '金币获取 +15%', icon: 'ic_wisdom' },
   { id: 'regen', type: 'passive', maxLv: 5, name: '再生药剂', desc: '每秒回复 0.6 生命', icon: 'ic_regen' },
   { id: 'crit', type: 'passive', maxLv: 5, name: '致命目镜', desc: '暴击率 +8%（暴击造成双倍伤害）', icon: 'ic_crit' },
 ]
@@ -139,13 +143,9 @@ export class Game {
   // 打击感
   hitStop = 0 // 顿帧：命中大目标时短暂冻结
   hurtFlash = 0 // 受击红闪
-  rerolls = 3 // 升级重掷次数
 
-  level = 1; xp = 0; xpNext = 8
-  pendingLv = 0
   weapons: WeaponState[] = []
   passives: Record<string, number> = {}
-  choices: Choice[] = []
 
   enemies: Enemy[] = []
   projs: Proj[] = []
@@ -160,18 +160,19 @@ export class Game {
   parts: Particle[] = []
   floats: FloatText[] = []
 
-  spawnT = 0
   eid = 1
-  eliteIdx = 0
-  bossSpawned = false
   boss: Enemy | null = null
   grid = new Map<string, Enemy[]>()
 
-  // 怪物狂潮事件
-  nextSurge = SURGE_INTERVAL
-  surgeMode = 0 // 剩余加速时间
-  // 击杀里程碑
-  nextMilestone = 100
+  // ---------- 楼层 / 房间 ----------
+  floor: Floor = genFloor(1)
+  curKey = ''
+  depth = 1
+  /** 本房间的道具台（宝箱房）*/
+  pedestal: { x: number; y: number; choice: Choice } | null = null
+  /** Boss 被击败后出现的通往下一层的地板洞 */
+  trapdoor: { x: number; y: number } | null = null
+  roomFlash = 0 // 进房过渡
 
   constructor() {
     this.cv.width = VW
@@ -189,15 +190,16 @@ export class Game {
   get dmgMul() { return (1 + 0.12 * (this.passives.power || 0)) * (1 + this.eq.dmg / 100) }
   get cdMul() { return Math.pow(0.92, this.passives.haste || 0) * (1 - Math.min(0.5, this.eq.cdr / 100)) }
   get magnetR() { return 28 * (1 + 0.45 * (this.passives.magnet || 0)) * (1 + this.eq.magnet / 100) }
-  get xpMul() { return (1 + 0.15 * (this.passives.wisdom || 0)) * (1 + this.eq.xp / 100) }
+  /** 金币获取倍率（房间制取消了经验，原经验词缀改为增益金币，避免属性失效） */
+  get goldMul() { return (1 + 0.15 * (this.passives.wisdom || 0)) * (1 + this.eq.xp / 100) }
   get regen() { return 0.6 * (this.passives.regen || 0) + this.eq.regen }
   get critChance() { return 0.05 + 0.08 * (this.passives.crit || 0) + this.eq.crit / 100 }
   /** 伤害减免，上限 60% 防止无敌 */
   get armorMul() { return 1 - Math.min(0.6, this.eq.armor / 100) }
 
-  // 鼠标在世界坐标中的位置（相机取整口径与 draw 保持一致）
-  get aimX() { return Math.round(this.camX - VW / 2) + Input.mx }
-  get aimY() { return Math.round(this.camY - VH / 2) + Input.my }
+  // 鼠标在房间局部坐标中的位置（房间制下相机固定，直接减去房间原点）
+  get aimX() { return Input.mx - OX }
+  get aimY() { return Input.my - OY }
   // 玩家 → 鼠标的朝向；鼠标压在身上时回退到面朝方向，避免角度乱跳
   get aimAngle() {
     const dx = this.aimX - this.px, dy = this.aimY - this.py
@@ -207,23 +209,161 @@ export class Game {
 
   reset() {
     this.t = 0; this.kills = 0; this.shake = 0
-    this.px = 0; this.py = 0
+    this.px = ROOM_W / 2; this.py = ROOM_H / 2
     this.camX = 0; this.camY = 0
     this.maxHp = 100 + this.eq.maxHp // 装备提供的生命上限
     this.hp = this.maxHp; this.invuln = 0
     this.runLoot = []; this.runGold = 0
     this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0; this.dashBuf = 0
-    this.hitStop = 0; this.hurtFlash = 0; this.rerolls = 3
-    this.level = 1; this.xp = 0; this.xpNext = 8; this.pendingLv = 0
+    this.hitStop = 0; this.hurtFlash = 0
+    this.depth = 1
+    this.pedestal = null; this.trapdoor = null; this.boss = null
     this.weapons = [{ id: 'knife', lv: 1, t: 0.2, evolved: false }]
     this.passives = {}
     this.enemies = []; this.projs = []; this.eprojs = []; this.gems = []; this.hearts = []
     this.chests = []; this.novas = []; this.bolts = []; this.parts = []; this.floats = []
     this.boomers = []; this.homers = []
-    this.spawnT = 0.5; this.eid = 1; this.eliteIdx = 0
-    this.bossSpawned = false; this.boss = null
-    this.nextSurge = SURGE_INTERVAL; this.surgeMode = 0; this.nextMilestone = 100
+    this.eid = 1
     this.win = false; this.newRecord = false
+    // 生成第一层并进入起始房
+    this.floor = genFloor(1)
+    this.enterRoom(this.floor.startKey, null)
+  }
+
+  // ================================================================
+  // 房间制核心
+  // ================================================================
+  get room(): RoomDef { return this.floor.rooms.get(this.curKey)! }
+
+  /** 进入房间。fromDir 是「从哪个方向的门走进来的」，用于把玩家摆到对门口 */
+  enterRoom(key: string, fromDir: Dir | null) {
+    this.curKey = key
+    const r = this.room
+    r.visited = true
+    this.roomFlash = 0.25
+
+    // 换房清场：残留弹体会打到下一间，属于串味
+    this.enemies = []; this.projs = []; this.eprojs = []
+    this.boomers = []; this.homers = []; this.novas = []; this.bolts = []
+    this.gems = []; this.hearts = []; this.chests = []
+    this.grid.clear()
+    this.boss = null
+    this.pedestal = null
+    this.trapdoor = null
+
+    // 玩家落位：从对面那扇门旁边进来
+    if (fromDir) {
+      const v = DIRS[fromDir]
+      // fromDir 是离开上一间的方向，所以在新房间里从它的反方向门进入
+      this.px = ROOM_W / 2 - v.dx * (ROOM_W / 2 - 34)
+      this.py = ROOM_H / 2 - v.dy * (ROOM_H / 2 - 34)
+    } else {
+      this.px = ROOM_W / 2
+      this.py = ROOM_H / 2
+    }
+
+    if (!r.spawned) {
+      r.spawned = true
+      this.populateRoom(r)
+    }
+    // Boss 房清完之后回来，要保证地板洞还在
+    if (r.type === 'boss' && r.cleared) this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
+    if (r.type === 'treasure' && !r.looted) this.makePedestal()
+  }
+
+  /** 首次进入房间时生成内容 */
+  populateRoom(r: RoomDef) {
+    if (r.type === 'start') { r.cleared = true; return }
+    if (r.type === 'treasure') { r.cleared = true; return }
+
+    if (r.type === 'boss') {
+      const e = this.spawnEnemyAt('boss', ROOM_W / 2, ROOM_H * 0.32)
+      this.boss = e
+      sfx.boss()
+      this.shake = 1
+      return
+    }
+
+    // 普通房：按层数堆量，随机兵种组合
+    const n = clamp(2 + Math.floor(this.depth * 1.2) + Math.floor(rand(0, 3)), 2, 10)
+    const kinds: EnemyKind[] = this.depth >= 3 ? ['slime', 'bat', 'skel'] : this.depth >= 2 ? ['slime', 'bat'] : ['slime', 'bat']
+    for (let i = 0; i < n; i++) {
+      const a = (Math.PI * 2 * i) / n + rand(-0.3, 0.3)
+      const rad = rand(60, Math.min(ROOM_W, ROOM_H) * 0.4)
+      const x = clamp(ROOM_W / 2 + Math.cos(a) * rad, 30, ROOM_W - 30)
+      const y = clamp(ROOM_H / 2 + Math.sin(a) * rad, 30, ROOM_H - 30)
+      this.spawnEnemyAt(pick(kinds), x, y)
+    }
+    // 精英作为「房间挑战」偶发出现
+    if (this.depth >= 2 && chance(0.18)) {
+      this.spawnEnemyAt('elite', ROOM_W / 2, ROOM_H / 2)
+      this.float(ROOM_W / 2, ROOM_H / 2 - 30, '精英房间！', '#ff9f4f', 10)
+    }
+  }
+
+  /** 宝箱房的道具台：从可用升级里抽一件 */
+  makePedestal() {
+    this.pedestal = { x: ROOM_W / 2, y: ROOM_H / 2, choice: this.randomUpgrade() }
+  }
+
+  /** 房间是否已清空（无存活敌人） */
+  checkRoomClear() {
+    const r = this.room
+    if (r.cleared) return
+    if (this.enemies.some(e => !e.dead)) return
+    r.cleared = true
+    sfx.levelup()
+    this.float(this.px, this.py - 30, '房间清空！', '#57e6a0', 10)
+    if (r.type === 'boss') {
+      this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
+      this.float(ROOM_W / 2, ROOM_H / 2 - 40, '地板裂开了……', '#ffd75e', 10)
+    }
+  }
+
+  /** 走到门口就换房（房间未清空时门是锁的） */
+  checkDoors() {
+    const r = this.room
+    if (!r.cleared) return
+    for (const d of DIR_LIST) {
+      if (!hasDoor(this.floor, r, d)) continue
+      const v = DIRS[d]
+      // 门在墙中央
+      const dxOK = v.dx === 0 ? Math.abs(this.px - ROOM_W / 2) < DOOR_HALF : (v.dx > 0 ? this.px > ROOM_W - 8 : this.px < 8)
+      const dyOK = v.dy === 0 ? Math.abs(this.py - ROOM_H / 2) < DOOR_HALF : (v.dy > 0 ? this.py > ROOM_H - 8 : this.py < 8)
+      if (dxOK && dyOK) {
+        const nk = rkey(r.gx + v.dx, r.gy + v.dy)
+        if (this.floor.rooms.has(nk)) {
+          this.enterRoom(nk, d)
+          return
+        }
+      }
+    }
+  }
+
+  /** 把实体限制在房间内；门口留缺口，房间清空后才放行 */
+  clampToRoom(o: { x: number; y: number }, rad: number, isPlayer: boolean) {
+    const open = isPlayer && this.room.cleared
+    const nearDoorX = Math.abs(o.x - ROOM_W / 2) < DOOR_HALF
+    const nearDoorY = Math.abs(o.y - ROOM_H / 2) < DOOR_HALF
+    const canN = open && nearDoorX && hasDoor(this.floor, this.room, 'n')
+    const canS = open && nearDoorX && hasDoor(this.floor, this.room, 's')
+    const canW = open && nearDoorY && hasDoor(this.floor, this.room, 'w')
+    const canE = open && nearDoorY && hasDoor(this.floor, this.room, 'e')
+    if (!canW) o.x = Math.max(rad, o.x)
+    if (!canE) o.x = Math.min(ROOM_W - rad, o.x)
+    if (!canN) o.y = Math.max(rad, o.y)
+    if (!canS) o.y = Math.min(ROOM_H - rad, o.y)
+    // 即便开门也不能跑太远，走到门外一点就触发换房
+    o.x = clamp(o.x, -6, ROOM_W + 6)
+    o.y = clamp(o.y, -6, ROOM_H + 6)
+  }
+
+  nextFloor() {
+    this.depth++
+    this.floor = genFloor(this.depth)
+    this.enterRoom(this.floor.startKey, null)
+    this.float(this.px, this.py - 30, `第 ${this.depth} 层`, '#ffd75e', 12)
+    sfx.win()
   }
 
   // ---------- 主循环 ----------
@@ -258,9 +398,6 @@ export class Game {
         break
       case 'pause':
         if (Input.pressed('p') || Input.pressed('escape') || Input.mclick) this.state = 'play'
-        break
-      case 'levelup':
-        this.updateLevelUp()
         break
       case 'end':
         // 结算后回家，而不是回标题
@@ -382,28 +519,17 @@ export class Game {
     this.invuln = Math.max(0, this.invuln - dt)
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 4)
 
-    // 胜利判定
-    if (this.t >= WIN_TIME) { this.endRun(true); return }
-
+    this.roomFlash = Math.max(0, this.roomFlash - dt)
     this.movePlayer(dt)
+    const pp = { x: this.px, y: this.py }
+    this.clampToRoom(pp, 6, true)
+    this.px = pp.x; this.py = pp.y
 
     // 回复
     if (this.regen > 0) this.hp = Math.min(this.maxHp, this.hp + this.regen * dt)
 
-    // 击杀里程碑
-    if (this.kills >= this.nextMilestone) {
-      this.float(this.px, this.py - 34, `${this.nextMilestone === 1000 ? '千人斩！！' : this.nextMilestone + ' 击杀！'}`, '#ffd75e')
-      this.burst(this.px, this.py, '#ffd75e', 16)
-      const ca = rand(Math.PI * 2)
-      this.chests.push({ x: this.px + Math.cos(ca) * 36, y: this.py + Math.sin(ca) * 36, opened: 0 })
-      this.float(this.px, this.py - 46, '奖励宝箱！', '#ffd75e')
-      sfx.levelup()
-      this.nextMilestone *= 10
-    }
-
-    this.updateSurge(dt)
-    this.updateSpawning(dt)
     this.updateEnemies(dt)
+    for (const e of this.enemies) if (!e.dead) this.clampToRoom(e, e.r, false)
     this.rebuildGrid()
     this.separateEnemies()
     this.updateWeapons(dt)
@@ -417,26 +543,34 @@ export class Game {
     this.updateFx(dt)
     this.checkPlayerHit()
 
+    this.checkRoomClear()
+    this.updatePedestal()
+    this.updateTrapdoor()
+    this.checkDoors()
+
     if (this.hp <= 0) this.endRun(false)
   }
 
-  // ---------- 怪物狂潮事件：每 60 秒一波包围 + 刷怪加速 ----------
-  updateSurge(dt: number) {
-    this.surgeMode = Math.max(0, this.surgeMode - dt)
-    if (this.t >= this.nextSurge) {
-      this.nextSurge += SURGE_INTERVAL
-      this.surgeMode = 6
-      this.float(this.px, this.py - 40, '怪物狂潮！', '#ff4f6b')
-      sfx.boss()
-      // 环形包围一波
-      const ring = 12 + Math.floor(this.t / 30)
-      const kinds: EnemyKind[] = this.t < 120 ? ['slime', 'bat'] : ['slime', 'bat', 'skel']
-      for (let i = 0; i < ring; i++) {
-        const a = (Math.PI * 2 * i) / ring
-        const d = 250
-        this.spawnEnemyAt(pick(kinds), this.px + Math.cos(a) * d, this.py + Math.sin(a) * d)
-      }
+  /** 走到道具台上就拿走（以撒式：直接生效，无菜单） */
+  updatePedestal() {
+    const p = this.pedestal
+    if (!p) return
+    if (dist2(p.x, p.y, this.px, this.py) < 13 * 13) {
+      this.applyChoice(p.choice)
+      this.room.looted = true
+      this.pedestal = null
+      this.burst(p.x, p.y, '#ffd75e', 20)
+      this.float(p.x, p.y - 22, `获得 ${p.choice.def.name}！`, '#ffd75e', 11)
+      this.hitStop = 0.1
+      sfx.levelup()
     }
+  }
+
+  /** Boss 房清空后，踩地板洞下一层 */
+  updateTrapdoor() {
+    const td = this.trapdoor
+    if (!td) return
+    if (dist2(td.x, td.y, this.px, this.py) < 12 * 12) this.nextFloor()
   }
 
   endRun(win: boolean) {
@@ -462,54 +596,11 @@ export class Game {
     else sfx.lose()
   }
 
-  // ---------- 刷怪 ----------
-  updateSpawning(dt: number) {
-    // 精英
-    while (this.eliteIdx < ELITE_TIMES.length && this.t >= ELITE_TIMES[this.eliteIdx]) {
-      this.spawnEnemy('elite')
-      this.float(this.px, this.py - 30, '精英出现了！', '#ff9f4f')
-      sfx.boss()
-      this.eliteIdx++
-    }
-    // Boss
-    if (!this.bossSpawned && this.t >= BOSS_TIME) {
-      this.bossSpawned = true
-      this.boss = this.spawnEnemy('boss')
-      this.float(this.px, this.py - 30, 'BOSS 出现了！！', '#ff4f6b')
-      sfx.boss()
-      this.shake = 1
-    }
-    // 普通怪（狂潮期间刷怪加速）
-    this.spawnT -= dt * (this.surgeMode > 0 ? 2.2 : 1)
-    if (this.spawnT <= 0 && this.enemies.length < 220) {
-      this.spawnT = clamp(1.15 - this.t * 0.003, 0.22, 1.15)
-      const batch = 1 + Math.floor(this.t / 70)
-      for (let i = 0; i < batch; i++) {
-        let kind: EnemyKind = 'slime'
-        if (this.t > 45 && chance(0.4)) kind = 'bat'
-        if (this.t > 120 && chance(0.3)) kind = 'skel'
-        if (this.t > 210 && chance(0.25)) kind = 'skel'
-        const e = this.spawnEnemy(kind)
-        // 分裂史莱姆：更大更肉，死亡时裂成两只小史莱姆
-        if (kind === 'slime' && this.t > 30 && chance(0.12)) {
-          e.splits = 1
-          e.scale *= 1.6
-          e.r *= 1.4
-          e.hp = e.maxHp = e.maxHp * 2.2
-        }
-      }
-    }
-  }
-
-  spawnEnemy(kind: EnemyKind): Enemy {
-    const a = rand(Math.PI * 2)
-    return this.spawnEnemyAt(kind, this.px + Math.cos(a) * 300, this.py + Math.sin(a) * 300)
-  }
-
   spawnEnemyAt(kind: EnemyKind, x: number, y: number): Enemy {
     const base = ENEMY_BASE[kind]
-    const hpScale = kind === 'boss' || kind === 'elite' ? 1 + this.t / 300 : 1 + (this.t / 60) * 0.55
-    const dmgScale = 1 + (this.t / 300) * 0.5
+    // 强度按楼层深度递增（房间制下不再按存活时间）
+    const hpScale = 1 + (this.depth - 1) * 0.45
+    const dmgScale = 1 + (this.depth - 1) * 0.25
     const e: Enemy = {
       id: this.eid++, kind,
       x, y,
@@ -1062,7 +1153,7 @@ export class Game {
       gem.x += gem.vx * dt
       gem.y += gem.vy * dt
       if (d < 7) {
-        this.gainXp(gem.val)
+        this.gainCoin(gem.val)
         gem.val = -1 // 标记已拾取
       }
     }
@@ -1080,35 +1171,29 @@ export class Game {
     this.hearts = this.hearts.filter(h => !(h as any).got)
   }
 
-  // ---------- 宝箱：走上去开箱，送一次免费强化 ----------
+  // ---------- 宝箱：走上去开箱，直接给一件强化（以撒式，无菜单）----------
   updateChests(dt: number) {
     for (const c of this.chests) {
       if (c.opened) continue
       if (dist2(c.x, c.y, this.px, this.py) < 14 * 14) {
         c.opened = 0.01 // 触发开箱动画（渐进到 1）
-        this.pendingLv++
         sfx.levelup()
         this.burst(c.x, c.y, '#ffd75e', 14)
-        if (this.state === 'play') this.openLevelUp()
+        const ch = this.randomUpgrade()
+        this.applyChoice(ch)
+        this.float(c.x, c.y - 20, `获得 ${ch.def.name}！`, '#ffd75e', 10)
       }
     }
     for (const c of this.chests) if (c.opened > 0 && c.opened < 1) c.opened = Math.min(1, c.opened + dt * 4)
   }
 
-  gainXp(v: number) {
-    this.xp += v * this.xpMul
+  gainCoin(v: number) {
+    this.runGold += Math.max(1, Math.round(v * this.goldMul))
     sfx.pickup()
-    while (this.xp >= this.xpNext) {
-      this.xp -= this.xpNext
-      this.level++
-      this.xpNext = Math.round(this.xpNext * 1.3 + 2)
-      this.pendingLv++
-    }
-    if (this.pendingLv > 0 && this.state === 'play') this.openLevelUp()
   }
 
-  // ---------- 升级三选一 ----------
-  rollChoices() {
+  /** 从当前还能升的东西里随机抽一件 */
+  randomUpgrade(): Choice {
     const pool: Choice[] = []
     for (const def of UPG) {
       if (def.type === 'weapon') {
@@ -1121,45 +1206,13 @@ export class Game {
         if (l < def.maxLv) pool.push({ def, lv: l + 1 })
       }
     }
-    this.choices = shuffle(pool).slice(0, 3)
-    while (this.choices.length < 3) this.choices.push({ def: SNACK, lv: 1 })
-  }
-
-  openLevelUp() {
-    this.hitStop = 0 // 清掉残留顿帧，避免回到游戏后卡一下
-    this.rollChoices()
-    this.state = 'levelup'
-    sfx.levelup()
+    return pool.length ? pick(pool) : { def: SNACK, lv: 1 }
   }
 
   // 武器满级 + 对应被动 → 可进化
   evolvable(w: WeaponState): boolean {
     const evo = EVO[w.id]
     return !!evo && w.lv >= 5 && !w.evolved && (this.passives[evo.need] || 0) >= 1
-  }
-
-  updateLevelUp() {
-    let sel = -1
-    if (Input.pressed('1')) sel = 0
-    if (Input.pressed('2')) sel = 1
-    if (Input.pressed('3')) sel = 2
-    // 重掷：不消耗本次升级，只换一批选项
-    if (Input.pressed('r') && this.rerolls > 0) {
-      this.rerolls--
-      this.rollChoices()
-      sfx.pickup()
-      return
-    }
-    if (Input.mclick) {
-      const idx = this.cardAt(Input.mx, Input.my)
-      if (idx >= 0) sel = idx
-    }
-    if (sel >= 0 && sel < this.choices.length) {
-      this.applyChoice(this.choices[sel])
-      this.pendingLv--
-      if (this.pendingLv > 0) this.openLevelUp()
-      else this.state = 'play'
-    }
   }
 
   applyChoice(c: Choice) {
@@ -1195,24 +1248,7 @@ export class Game {
     this.burst(this.px, this.py, '#ffd75e', 24)
     sfx.win()
     this.shake = 0.6
-    this.hitStop = 0.12 // 进化顿帧（偏短：紧接升级菜单关闭，过长会像卡顿）
-  }
-
-  cardRects(): { x: number; y: number; w: number; h: number }[] {
-    const cw = 118, ch = 120, gap = 14
-    const total = cw * 3 + gap * 2
-    const x0 = (VW - total) / 2
-    const y = (VH - ch) / 2 + 10
-    return [0, 1, 2].map(i => ({ x: x0 + i * (cw + gap), y, w: cw, h: ch }))
-  }
-
-  cardAt(mx: number, my: number): number {
-    const rects = this.cardRects()
-    for (let i = 0; i < rects.length; i++) {
-      const r = rects[i]
-      if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) return i
-    }
-    return -1
+    this.hitStop = 0.12 // 进化顿帧
   }
 
   // ================================================================
@@ -1461,17 +1497,15 @@ export class Game {
     if (this.state === 'hub') { this.drawHub(); return }
     if (this.state === 'inventory') { this.drawHub(); this.drawInventory(); return }
 
-    // 相机（含震动）
-    const sx = this.shake > 0 ? rand(-3, 3) * this.shake : 0
-    const sy = this.shake > 0 ? rand(-3, 3) * this.shake : 0
-    // 相机取整：像素对齐，消除缩放后的抖动/糊边
-    const cx = Math.round(this.camX - VW / 2 + sx)
-    const cy = Math.round(this.camY - VH / 2 + sy)
+    // 房间制：相机固定，一屏一间，只有震动会偏移
+    const sx = Math.round(this.shake > 0 ? rand(-3, 3) * this.shake : 0)
+    const sy = Math.round(this.shake > 0 ? rand(-3, 3) * this.shake : 0)
 
-    this.drawGround(cx, cy)
+    this.drawRoom(sx, sy)
 
-    const W = (wx: number) => wx - cx
-    const H = (wy: number) => wy - cy
+    // 房间局部坐标 → 画布坐标
+    const W = (wx: number) => OX + sx + wx
+    const H = (wy: number) => OY + sy + wy
 
     // 灼热光环 / 炼狱（在敌人下层）
     const aura = this.weapons.find(w => w.id === 'aura')
@@ -1490,6 +1524,45 @@ export class Game {
           this.parts.push({ x: this.px + Math.cos(a) * r * 0.9, y: this.py + Math.sin(a) * r * 0.9, vx: rand(-6, 6), vy: -24, life: 0.5, maxLife: 0.5, color: '#ff6b35', size: 1 })
         }
       }
+    }
+
+    // 地板洞（通往下一层）
+    const td = this.trapdoor
+    if (td) {
+      this.glow(W(td.x), H(td.y), 26, '#9f6bff', 0.5)
+      g.fillStyle = '#0a0512'
+      g.beginPath(); g.ellipse(W(td.x), H(td.y), 15, 9, 0, 0, Math.PI * 2); g.fill()
+      g.strokeStyle = '#b98cff'
+      g.lineWidth = 2
+      g.beginPath(); g.ellipse(W(td.x), H(td.y), 15, 9, 0, 0, Math.PI * 2); g.stroke()
+      g.lineWidth = 1
+      g.textAlign = 'center'
+      g.font = '8px monospace'
+      g.fillStyle = '#b98cff'
+      if (Math.floor(this.frameT * 2) % 2 === 0) g.fillText('下一层', W(td.x), H(td.y) - 16)
+    }
+
+    // 道具台
+    const ped = this.pedestal
+    if (ped) {
+      const bob = Math.sin(this.frameT * 3) * 2
+      // 台座
+      g.fillStyle = '#3a3f66'
+      g.fillRect(Math.round(W(ped.x) - 7), Math.round(H(ped.y) + 2), 14, 6)
+      g.fillStyle = '#5c6285'
+      g.fillRect(Math.round(W(ped.x) - 9), Math.round(H(ped.y) + 7), 18, 3)
+      // 悬浮的道具图标
+      this.glow(W(ped.x), H(ped.y) - 6 + bob, 16, '#ffd75e', 0.5)
+      const icon = SPR[ped.choice.def.icon]
+      const isc = 2
+      g.drawImage(icon, Math.round(W(ped.x) - icon.width * isc / 2), Math.round(H(ped.y) - 10 + bob - icon.height * isc / 2), icon.width * isc, icon.height * isc)
+      g.textAlign = 'center'
+      g.font = 'bold 8px monospace'
+      g.fillStyle = '#ffd75e'
+      g.fillText(ped.choice.def.name, W(ped.x), H(ped.y) - 24)
+      g.font = '7px monospace'
+      g.fillStyle = '#9aa4c8'
+      g.fillText(ped.choice.def.desc, W(ped.x), H(ped.y) + 22)
     }
 
     // 宝箱
@@ -1711,7 +1784,6 @@ export class Game {
 
     this.drawHud()
 
-    if (this.state === 'levelup') this.drawLevelUp()
     if (this.state === 'pause') this.drawPause()
     if (this.state === 'end') this.drawEnd()
   }
@@ -1749,47 +1821,133 @@ export class Game {
     g.restore()
   }
 
-  drawGround(cx: number, cy: number) {
+  /** 画当前房间：地砖 + 四面墙 + 门 */
+  drawRoom(sx: number, sy: number) {
     const g = this.g
+    const ox = OX + sx, oy = OY + sy
+    g.fillStyle = '#08080f'
+    g.fillRect(0, 0, VW, VH)
+
+    // 地砖（房间内部按房间种子哈希，同一间每次进来长得一样）
     const ts = 16
-    const x0 = Math.floor(cx / ts), y0 = Math.floor(cy / ts)
-    // 铺满地牢石砖，按坐标哈希选变体（无状态，滚动时不会闪烁）
-    for (let ty = y0; ty <= y0 + VH / ts + 1; ty++) {
-      for (let tx = x0; tx <= x0 + VW / ts + 1; tx++) {
-        const h = ((tx * 73856093) ^ (ty * 19349663)) >>> 0
-        g.drawImage(FLOOR[h % FLOOR.length], tx * ts - cx, ty * ts - cy)
+    const seed = this.room ? this.room.seed : 0
+    for (let y = 0; y < ROOM_H; y += ts) {
+      for (let x = 0; x < ROOM_W; x += ts) {
+        const h = ((x * 73856093) ^ (y * 19349663) ^ seed) >>> 0
+        g.drawImage(FLOOR[h % FLOOR.length], ox + x, oy + y)
       }
     }
-    // 暗角：四周压暗，把注意力收到中心
-    const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.35, VW / 2, VH / 2, VH * 0.85)
+
+    // 墙体
+    g.fillStyle = '#1a1626'
+    g.fillRect(ox - WALL, oy - WALL, ROOM_W + WALL * 2, WALL)
+    g.fillRect(ox - WALL, oy + ROOM_H, ROOM_W + WALL * 2, WALL)
+    g.fillRect(ox - WALL, oy, WALL, ROOM_H)
+    g.fillRect(ox + ROOM_W, oy, WALL, ROOM_H)
+    g.strokeStyle = '#3a3050'
+    g.lineWidth = 1
+    g.strokeRect(ox - 0.5, oy - 0.5, ROOM_W + 1, ROOM_H + 1)
+
+    // 门：清空前是红色锁闭，清空后是绿色通路
+    const r = this.room
+    if (r) {
+      const open = r.cleared
+      for (const d of DIR_LIST) {
+        if (!hasDoor(this.floor, r, d)) continue
+        const v = DIRS[d]
+        const cx = ox + ROOM_W / 2 + v.dx * (ROOM_W / 2 + WALL / 2)
+        const cy = oy + ROOM_H / 2 + v.dy * (ROOM_H / 2 + WALL / 2)
+        const horiz = v.dy !== 0
+        const w = horiz ? DOOR_HALF * 2 : WALL
+        const h = horiz ? WALL : DOOR_HALF * 2
+        g.fillStyle = open ? '#2c4a38' : '#4a2230'
+        g.fillRect(cx - w / 2, cy - h / 2, w, h)
+        if (open) {
+          this.glow(cx, cy, 16, '#57e6a0', 0.35)
+          g.fillStyle = '#57e6a0'
+        } else {
+          g.fillStyle = '#ff4f6b'
+        }
+        // 门闩样式：开门是两道细边，锁门是横栏
+        if (open) {
+          if (horiz) { g.fillRect(cx - w / 2, cy - h / 2, 2, h); g.fillRect(cx + w / 2 - 2, cy - h / 2, 2, h) }
+          else { g.fillRect(cx - w / 2, cy - h / 2, w, 2); g.fillRect(cx - w / 2, cy + h / 2 - 2, w, 2) }
+        } else {
+          if (horiz) g.fillRect(cx - w / 2 + 2, cy - 1, w - 4, 2)
+          else g.fillRect(cx - 1, cy - h / 2 + 2, 2, h - 4)
+        }
+      }
+    }
+
+    // 暗角
+    const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.4, VW / 2, VH / 2, VH * 0.95)
     vg.addColorStop(0, 'rgba(0,0,0,0)')
-    vg.addColorStop(1, 'rgba(0,0,0,0.55)')
+    vg.addColorStop(1, 'rgba(0,0,0,0.5)')
     g.fillStyle = vg
     g.fillRect(0, 0, VW, VH)
   }
 
+  /** 右上角小地图 */
+  drawMinimap() {
+    const g = this.g
+    const cell = 9, gap = 2
+    let minX = 99, maxX = -99, minY = 99, maxY = -99
+    for (const r of this.floor.rooms.values()) {
+      minX = Math.min(minX, r.gx); maxX = Math.max(maxX, r.gx)
+      minY = Math.min(minY, r.gy); maxY = Math.max(maxY, r.gy)
+    }
+    const w = (maxX - minX + 1) * (cell + gap)
+    const x0 = VW - w - 6, y0 = 34
+    for (const r of this.floor.rooms.values()) {
+      // 未访问且不相邻于已访问的房间不显示，保留探索感
+      const adj = DIR_LIST.some(d => {
+        const v = DIRS[d]
+        const nr = this.floor.rooms.get(rkey(r.gx + v.dx, r.gy + v.dy))
+        return nr && nr.visited
+      })
+      if (!r.visited && !adj) continue
+      const x = x0 + (r.gx - minX) * (cell + gap)
+      const y = y0 + (r.gy - minY) * (cell + gap)
+      const cur = rkey(r.gx, r.gy) === this.curKey
+      if (!r.visited) g.fillStyle = '#2a2e4a'
+      else if (r.type === 'boss') g.fillStyle = '#b13e53'
+      else if (r.type === 'treasure') g.fillStyle = '#ffd75e'
+      else g.fillStyle = r.cleared ? '#3f4870' : '#5c6285'
+      g.fillRect(x, y, cell, cell)
+      if (cur) {
+        g.strokeStyle = '#ffffff'
+        g.lineWidth = 1
+        g.strokeRect(x - 0.5, y - 0.5, cell + 1, cell + 1)
+      }
+    }
+  }
+
   drawHud() {
     const g = this.g
-    // XP 条
-    g.fillStyle = '#171a2e'
-    g.fillRect(0, 0, VW, 6)
-    g.fillStyle = '#57e6e6'
-    g.fillRect(0, 0, VW * clamp(this.xp / this.xpNext, 0, 1), 6)
-    g.font = '8px monospace'
+    // 层数 + 房间类型
+    g.font = 'bold 10px monospace'
     g.textAlign = 'left'
     g.fillStyle = '#ffffff'
-    g.fillText(`Lv ${this.level}`, 4, 16)
+    g.fillText(`第 ${this.depth} 层`, 4, 14)
+    const r = this.room
+    if (r) {
+      g.font = '8px monospace'
+      g.fillStyle = r.type === 'boss' ? '#ff4f6b' : r.type === 'treasure' ? '#ffd75e' : '#9aa4c8'
+      const tn = r.type === 'boss' ? 'BOSS 房' : r.type === 'treasure' ? '宝箱房' : r.type === 'start' ? '起始房' : '战斗房'
+      g.fillText(`${tn}${r.cleared ? '' : ' · 门已锁'}`, 4, 26)
+    }
     // 计时
     g.textAlign = 'center'
     g.font = 'bold 12px monospace'
-    g.fillStyle = this.t >= BOSS_TIME ? '#ff4f6b' : '#ffffff'
+    g.fillStyle = '#ffffff'
     g.fillText(fmtTime(this.t), VW / 2, 20)
     // 击杀
     g.textAlign = 'right'
     g.font = '8px monospace'
     g.fillStyle = '#ffd75e'
-    g.fillText(`击杀 ${this.kills}`, VW - 4, 16)
-    g.fillText(`金币 ${this.runGold}${this.runLoot.length ? ` · 战利品 ${this.runLoot.length}` : ''}`, VW - 4, 27)
+    g.fillText(`击杀 ${this.kills}`, VW - 4, 14)
+    g.fillText(`金币 ${this.runGold}${this.runLoot.length ? ` · 战利品 ${this.runLoot.length}` : ''}`, VW - 4, 26)
+    this.drawMinimap()
     // HP 条
     const hw = 70
     g.fillStyle = '#171a2e'
@@ -1818,7 +1976,7 @@ export class Game {
       g.textAlign = 'center'
       g.fillStyle = `rgba(255,255,255,${clamp(8 - this.t, 0, 1) * 0.8})`
       g.font = '9px monospace'
-      g.fillText('WASD 移动 · 鼠标瞄准 · Space/Shift 冲刺 · 坚持 5 分钟！', VW / 2, VH - 28)
+      g.fillText('WASD 移动 · 鼠标瞄准 · Space/Shift 冲刺 · 清空房间开门', VW / 2, VH - 28)
     }
     // 武器栏（左上角，已进化高亮）
     let wx = 4
@@ -1859,69 +2017,6 @@ export class Game {
       g.fillStyle = '#9aa4c8'
       g.fillText('静音中 (M)', VW - 4, 28)
     }
-  }
-
-  drawLevelUp() {
-    const g = this.g
-    g.fillStyle = 'rgba(7,7,13,0.78)'
-    g.fillRect(0, 0, VW, VH)
-    g.textAlign = 'center'
-    g.font = 'bold 16px monospace'
-    g.fillStyle = '#ffd75e'
-    g.fillText('升 级 ！', VW / 2, this.cardRects()[0].y - 58)
-    g.font = '9px monospace'
-    g.fillStyle = '#9aa4c8'
-    g.fillText('选择一项强化（点击 或 按 1 / 2 / 3）', VW / 2, this.cardRects()[0].y - 38)
-    // 重掷提示
-    g.font = '8px monospace'
-    g.fillStyle = this.rerolls > 0 ? '#57e6a0' : '#5c6285'
-    g.fillText(this.rerolls > 0 ? `按 R 重掷（剩 ${this.rerolls} 次）` : '重掷次数已用完', VW / 2, VH - 12)
-
-    const rects = this.cardRects()
-    this.choices.forEach((c, i) => {
-      const r = rects[i]
-      const hover = this.cardAt(Input.mx, Input.my) === i
-      g.fillStyle = hover ? '#232743' : '#171a2e'
-      g.fillRect(r.x, r.y, r.w, r.h)
-      g.strokeStyle = hover ? '#ffd75e' : '#3a3f66'
-      g.lineWidth = hover ? 2 : 1
-      g.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1)
-
-      const icon = SPR[c.def.icon]
-      const isc = 3
-      g.drawImage(icon, r.x + r.w / 2 - (icon.width * isc) / 2, r.y + 12, icon.width * isc, icon.height * isc)
-
-      g.textAlign = 'center'
-      g.font = 'bold 10px monospace'
-      g.fillStyle = '#ffffff'
-      g.fillText(c.def.name, r.x + r.w / 2, r.y + 58)
-      g.font = '8px monospace'
-      g.fillStyle = c.def.type === 'weapon' && c.lv === 1 ? '#57e6a0' : '#57c7ff'
-      const tag = c.def.type === 'snack' ? '补给' : c.lv === 1 && c.def.type === 'weapon' ? '新武器！' : `Lv ${c.lv - 1} → Lv ${c.lv}`
-      g.fillText(tag, r.x + r.w / 2, r.y + 72)
-      // 描述换行
-      g.fillStyle = '#9aa4c8'
-      this.wrapText(c.def.desc, r.x + r.w / 2, r.y + 88, r.w - 14, 11)
-      // 进化配方提示（满级武器或对应被动时显示）
-      if (c.def.type === 'weapon' && EVO[c.def.id]) {
-        const needDef = UPG.find(u => u.id === EVO[c.def.id].need)
-        const have = (this.passives[EVO[c.def.id].need] || 0) >= 1
-        g.font = '7px monospace'
-        g.fillStyle = have ? '#57e6a0' : '#8a6d3b'
-        g.fillText(`进化：满级+${needDef?.name ?? '?'}`, r.x + r.w / 2, r.y + r.h - 20)
-      } else if (c.def.type === 'passive') {
-        // 该被动是哪些武器的进化条件
-        const unlocks = Object.entries(EVO).filter(([, v]) => v.need === c.def.id).map(([k]) => UPG.find(u => u.id === k)?.name)
-        if (unlocks.length) {
-          g.font = '7px monospace'
-          g.fillStyle = '#8a6d3b'
-          g.fillText(`进化条件：${unlocks.join('/')}`, r.x + r.w / 2, r.y + r.h - 20)
-        }
-      }
-      g.font = '8px monospace'
-      g.fillStyle = '#5c6285'
-      g.fillText(`[ ${i + 1} ]`, r.x + r.w / 2, r.y + r.h - 8)
-    })
   }
 
   wrapText(txt: string, cx: number, y: number, maxW: number, lineH: number) {
@@ -1972,7 +2067,7 @@ export class Game {
     y = VH * 0.38
     g.font = '10px monospace'
     g.fillStyle = '#ffffff'
-    g.fillText(`存活 ${fmtTime(this.t)}  ·  击杀 ${this.kills}  ·  Lv ${this.level}`, cx, y); y += 16
+    g.fillText(`第 ${this.depth} 层  ·  存活 ${fmtTime(this.t)}  ·  击杀 ${this.kills}`, cx, y); y += 16
     const evoCount = this.weapons.filter(w => w.evolved).length
     if (evoCount > 0) {
       g.fillStyle = '#ffd75e'
