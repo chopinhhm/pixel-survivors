@@ -579,7 +579,9 @@ export class Game {
     this.hitStop = 0
     const time = Math.floor(this.t)
     const best = this.profile.best
-    this.newRecord = time > best.time || (win && best.wins === 0)
+    // 房间制下「深度」才是成绩，破纪录以此为准
+    this.newRecord = this.depth > (best.depth || 0)
+    best.depth = Math.max(best.depth || 0, this.depth)
     best.time = Math.max(best.time, time)
     best.kills = Math.max(best.kills, this.kills)
     if (win) best.wins++
@@ -1885,6 +1887,12 @@ export class Game {
     vg.addColorStop(1, 'rgba(0,0,0,0.5)')
     g.fillStyle = vg
     g.fillRect(0, 0, VW, VH)
+
+    // 进房过渡：短暂压黑，让换房有"切镜头"的段落感
+    if (this.roomFlash > 0) {
+      g.fillStyle = `rgba(0,0,0,${clamp(this.roomFlash / 0.25, 0, 1) * 0.55})`
+      g.fillRect(0, 0, VW, VH)
+    }
   }
 
   /** 右上角小地图 */
@@ -2251,23 +2259,27 @@ export class Game {
     g.fillStyle = '#57c7ff'
     g.fillText('- PIXEL SURVIVORS -', VW / 2, VH * 0.52)
     // 敌人展示行
+    // 敌人展示行：按各自实际宽度排布，避免大体型互相重叠
     const foes: EnemyKind[] = ['slime', 'bat', 'skel', 'elite', 'boss']
     const ef = Math.floor(this.frameT * 6) % 4
-    let fx = VW / 2 - (foes.length - 1) * 20 / 2
-    for (const k of foes) {
+    const scaleOf = (k: EnemyKind) => (k === 'boss' ? 1.2 : k === 'elite' ? 0.9 : 1.1)
+    const widths = foes.map(k => (frame(k, ef) as any).width * scaleOf(k))
+    const gapF = 10
+    const totalW = widths.reduce((s, w) => s + w, 0) + gapF * (foes.length - 1)
+    let fx = VW / 2 - totalW / 2
+    foes.forEach((k, i) => {
       const fi = frame(k, ef) as CanvasImageSource
-      const s = k === 'boss' ? 1.2 : k === 'elite' ? 0.9 : 1.1
-      const w = (fi as any).width * s, hh = (fi as any).height * s
-      g.drawImage(fi, Math.round(fx - w / 2), Math.round(VH * 0.62 - hh / 2), w, hh)
-      fx += 20
-    }
+      const s = scaleOf(k)
+      const w = widths[i], hh = (fi as any).height * s
+      g.drawImage(fi, Math.round(fx), Math.round(VH * 0.62 - hh / 2), w, hh)
+      fx += w + gapF
+    })
     // 最佳纪录
-    if (this.profile.best.time > 0) {
+    if (this.profile.best.depth > 0 || this.profile.best.time > 0) {
       g.fillStyle = '#9aa4c8'
       g.font = '8px monospace'
       const b = this.profile.best
-      const wins = b.wins > 0 ? ` · 通关 ${b.wins} 次` : ''
-      g.fillText(`最佳纪录  存活 ${fmtTime(b.time)} · 击杀 ${b.kills}${wins}`, VW / 2, VH * 0.71)
+      g.fillText(`最深纪录  第 ${b.depth || 1} 层 · 存活 ${fmtTime(b.time)} · 击杀 ${b.kills}`, VW / 2, VH * 0.71)
     }
     // 开始提示（闪烁）
     if (Math.floor(this.frameT * 2) % 2 === 0) {
@@ -2278,6 +2290,6 @@ export class Game {
     g.font = '8px monospace'
     g.fillStyle = '#5c6285'
     g.fillText('家园出发 · 传送门冒险 · 掉落装备带回家变强', VW / 2, VH * 0.90)
-    g.fillText('坚持 5 分钟 · P 暂停 · M 静音', VW / 2, VH * 0.945)
+    g.fillText('清空房间开门 · 逐层深入 · P 暂停 · M 静音', VW / 2, VH * 0.945)
   }
 }

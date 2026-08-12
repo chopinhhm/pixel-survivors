@@ -57,7 +57,10 @@ export function genFloor(depth: number): Floor {
     const m = new Map<string, RoomDef>()
     m.set(rkey(0, 0), mkRoom(0, 0, 'start'))
     const queue: RoomDef[] = [m.get(rkey(0, 0))!]
-    while (m.size < target && queue.length) {
+    // 硬上限：重新播种时若所有房间都无法扩张，队列长度会恒为 1 而循环不退出，
+    // 这在浏览器里是整页卡死，代价太高，所以宁可少几间房也要有兜底
+    let guard = 0
+    while (m.size < target && queue.length && guard++ < 4000) {
       const cur = queue.shift()!
       const dirs = DIR_LIST.slice().sort(() => Math.random() - 0.5)
       for (const d of dirs) {
@@ -82,6 +85,11 @@ export function genFloor(depth: number): Floor {
     }
     if (m.size > rooms.size) rooms = m
     if (rooms.size >= target) break
+  }
+
+  // 兜底：极端情况下只长出起始房会导致无门可走（卡死玩家），强行接一间
+  if (rooms.size < 2) {
+    rooms.set(rkey(1, 0), mkRoom(1, 0, 'normal'))
   }
 
   const startKey = rkey(0, 0)

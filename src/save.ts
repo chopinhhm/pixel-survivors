@@ -1,7 +1,8 @@
 // 持久化档案：金币、背包、已装备、最佳纪录
 import type { Item, Slot } from './items'
 
-export interface Best { time: number; kills: number; wins: number }
+/** depth 是房间制之后的核心成绩（原 wins 依赖已删除的「撑满5分钟」胜利条件） */
+export interface Best { time: number; kills: number; wins: number; depth: number }
 
 export interface Profile {
   gold: number
@@ -22,7 +23,7 @@ export function emptyProfile(): Profile {
     uidSeq: 1,
     inv: [],
     eq: { weapon: null, armor: null, ring: null, amulet: null },
-    best: { time: 0, kills: 0, wins: 0 },
+    best: { time: 0, kills: 0, wins: 0, depth: 0 },
     runs: 0,
   }
 }
