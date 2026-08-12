@@ -32,6 +32,9 @@ function flipH(src: HTMLCanvasElement): HTMLCanvasElement {
 }
 
 // 被动道具图标：菱形徽章
+export function makeEmblem(color: string, inner: string): HTMLCanvasElement {
+  return emblem(color, inner)
+}
 function emblem(color: string, inner: string): HTMLCanvasElement {
   const c = document.createElement('canvas')
   c.width = 9

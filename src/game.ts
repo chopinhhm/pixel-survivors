@@ -7,6 +7,8 @@ import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, f
 import { Profile, loadProfile, saveProfile, INV_CAP } from './save'
 import { Floor, RoomDef, Dir, DIRS, DIR_LIST, genFloor, rkey, hasDoor } from './rooms'
 import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
+import { RunStats, RunItem, baseStats, computeStats, rollRunItem, ITEM_BY_ID } from './runitems'
+import { makeEmblem } from './sprites'
 
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
 const ENEMY_DRAW_SCALE: Record<string, number> = { slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6 }
@@ -49,6 +51,7 @@ interface Enemy {
   flash: number; auraCd: number; orbCd: number
   scale: number; spawnScale: number; deathT: number
   splits: number // 分裂史莱姆：死亡时分裂出的代数
+  slow: number // 寒霜减速剩余时间
   burn: number; burnT: number // 炼狱光环的持续燃烧
   atkT: number // 远程攻击冷却（骷髅）
   dashT: number; dashCd: number; dashDx: number; dashDy: number // 小恶魔突进方向
@@ -56,62 +59,32 @@ interface Enemy {
   specialT: number // Boss 招式计时
   dead?: boolean
 }
-interface Proj { x: number; y: number; vx: number; vy: number; dmg: number; life: number; pierce: number; angle: number }
+/** 统一的玩家弹体：所有道具修饰都作用在它身上 */
+interface Shot {
+  x: number; y: number; vx: number; vy: number
+  dmg: number; life: number
+  pierce: number; bounce: number; split: number
+  size: number
+  hit: Set<number> // 已命中敌人，防止穿透时对同一目标反复结算
+  targetId: number
+}
 interface EProj { x: number; y: number; vx: number; vy: number; dmg: number; life: number; r: number; color: string }
-interface Boomer { x: number; y: number; vx: number; vy: number; t: number; out: number; back: boolean; dmg: number; hit: Set<number>; ang: number }
-interface Homer { x: number; y: number; vx: number; vy: number; life: number; dmg: number; pierce: number; targetId: number }
 interface Gem { x: number; y: number; val: number; vx: number; vy: number }
 interface Heart { x: number; y: number }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: string; size: number }
 interface FloatText { x: number; y: number; txt: string; life: number; color: string; size: number }
 interface Nova { x: number; y: number; r: number; maxR: number; dmg: number; hit: Set<number> }
 interface Bolt { pts: number[]; life: number }
-interface WeaponState { id: string; lv: number; t: number; evolved: boolean }
 interface Chest { x: number; y: number; opened: number }
-
-interface UpDef {
-  id: string; type: 'weapon' | 'passive' | 'snack'
-  maxLv: number; name: string; desc: string; icon: string
-}
-
-// 武器进化：满级 + 对应被动 → 进化形态
-const EVO: Record<string, { need: string; name: string; desc: string }> = {
-  knife: { need: 'haste', name: '千刃风暴', desc: '进化！向四面八方掷出飞刀' },
-  orb: { need: 'power', name: '末日法球阵', desc: '进化！法球数量与威力暴增' },
-  nova: { need: 'vital', name: '超新星', desc: '进化！巨大的双重冲击波' },
-  bolt: { need: 'wisdom', name: '雷暴', desc: '进化！雷电如暴雨般落下' },
-  aura: { need: 'magnet', name: '炼狱', desc: '进化！烈焰灼烧并留下余烬' },
-  boomer: { need: 'speed', name: '回旋风暴', desc: '进化！三刃齐飞去而复返' },
-  homing: { need: 'regen', name: '天启导弹', desc: '进化！追踪导弹如雨点袭来' },
-}
-
-const UPG: UpDef[] = [
-  { id: 'knife', type: 'weapon', maxLv: 5, name: '飞刀', desc: '向最近的敌人投掷飞刀', icon: 'knife' },
-  { id: 'orb', type: 'weapon', maxLv: 5, name: '环绕法球', desc: '法球环绕自身旋转碾碎敌人', icon: 'orb' },
-  { id: 'nova', type: 'weapon', maxLv: 5, name: '新星冲击', desc: '周期性释放环形冲击波', icon: 'ic_nova' },
-  { id: 'bolt', type: 'weapon', maxLv: 5, name: '落雷', desc: '雷电劈向随机敌人', icon: 'ic_bolt' },
-  { id: 'aura', type: 'weapon', maxLv: 5, name: '灼热光环', desc: '持续灼烧周围的敌人', icon: 'ic_aura' },
-  { id: 'boomer', type: 'weapon', maxLv: 5, name: '回旋刃', desc: '掷出回旋刃，去而复返双重打击', icon: 'ic_boomer' },
-  { id: 'homing', type: 'weapon', maxLv: 5, name: '追踪飞弹', desc: '发射自动追踪敌人的飞弹', icon: 'ic_homing' },
-  { id: 'speed', type: 'passive', maxLv: 5, name: '疾风之靴', desc: '移动速度 +10%', icon: 'ic_speed' },
-  { id: 'vital', type: 'passive', maxLv: 5, name: '生命宝石', desc: '生命上限 +25 并回复 25', icon: 'ic_vital' },
-  { id: 'power', type: 'passive', maxLv: 5, name: '力量护符', desc: '所有伤害 +12%', icon: 'ic_power' },
-  { id: 'haste', type: 'passive', maxLv: 5, name: '急速手环', desc: '攻击冷却 -8%', icon: 'ic_haste' },
-  { id: 'magnet', type: 'passive', maxLv: 5, name: '磁力戒指', desc: '拾取范围 +45%', icon: 'ic_magnet' },
-  { id: 'wisdom', type: 'passive', maxLv: 5, name: '贪婪之书', desc: '金币获取 +15%', icon: 'ic_wisdom' },
-  { id: 'regen', type: 'passive', maxLv: 5, name: '再生药剂', desc: '每秒回复 0.6 生命', icon: 'ic_regen' },
-  { id: 'crit', type: 'passive', maxLv: 5, name: '致命目镜', desc: '暴击率 +8%（暴击造成双倍伤害）', icon: 'ic_crit' },
-]
-const SNACK: UpDef = { id: 'snack', type: 'snack', maxLv: 99, name: '烤鸡腿', desc: '立刻回复 40 生命', icon: 'ic_snack' }
-
-interface Choice { def: UpDef; lv: number }
 
 const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: number; r: number; xp: number; scale: number }> = {
   slime: { hp: 12, spd: 26, dmg: 8, r: 5, xp: 1, scale: 1 },
   bat: { hp: 8, spd: 55, dmg: 6, r: 5, xp: 1, scale: 1 },
   skel: { hp: 35, spd: 33, dmg: 14, r: 6, xp: 3, scale: 1 },
-  elite: { hp: 320, spd: 30, dmg: 20, r: 10, xp: 20, scale: 1.8 },
-  boss: { hp: 2600, spd: 24, dmg: 30, r: 14, xp: 60, scale: 2 },
+  // 血量按「单发基础弹」重新配平：旧值是给同时挂 7 把武器的幸存者模式用的，
+  // 房间制下只有一发基础弹，2600 血的 Boss 裸装要打 144 秒
+  elite: { hp: 150, spd: 30, dmg: 20, r: 10, xp: 20, scale: 1.8 },
+  boss: { hp: 850, spd: 24, dmg: 30, r: 14, xp: 60, scale: 2 },
 }
 
 export class Game {
@@ -154,14 +127,18 @@ export class Game {
   hitStop = 0 // 顿帧：命中大目标时短暂冻结
   hurtFlash = 0 // 受击红闪
 
-  weapons: WeaponState[] = []
-  passives: Record<string, number> = {}
+  // ---------- 局内道具 ----------
+  /** 本局已拾取的道具 id（可重复，效果叠加）*/
+  runItems: string[] = []
+  /** 累积后的属性，仅在拾取时重算 */
+  stats: RunStats = baseStats()
+  fireT = 0
+  orbAng = 0
+  boltT = 0
 
   enemies: Enemy[] = []
-  projs: Proj[] = []
+  shots: Shot[] = []
   eprojs: EProj[] = [] // 敌方弹体
-  boomers: Boomer[] = []
-  homers: Homer[] = []
   gems: Gem[] = []
   hearts: Heart[] = []
   chests: Chest[] = []
@@ -179,7 +156,7 @@ export class Game {
   curKey = ''
   depth = 1
   /** 本房间的道具台（宝箱房）*/
-  pedestal: { x: number; y: number; choice: Choice } | null = null
+  pedestal: { x: number; y: number; item: RunItem } | null = null
   /** Boss 被击败后出现的通往下一层的地板洞 */
   trapdoor: { x: number; y: number } | null = null
   roomFlash = 0 // 进房过渡
@@ -201,16 +178,43 @@ export class Game {
   private eqCache: Record<StatKey, number> = statTotal(this.profile.eq)
   get eq(): Record<StatKey, number> { return this.eqCache }
   refreshEq() { this.eqCache = statTotal(this.profile.eq) }
-  get spd() { return 72 * (1 + 0.1 * (this.passives.speed || 0)) * (1 + this.eq.spd / 100) }
-  get dmgMul() { return (1 + 0.12 * (this.passives.power || 0)) * (1 + this.eq.dmg / 100) }
-  get cdMul() { return Math.pow(0.92, this.passives.haste || 0) * (1 - Math.min(0.5, this.eq.cdr / 100)) }
-  get magnetR() { return 28 * (1 + 0.45 * (this.passives.magnet || 0)) * (1 + this.eq.magnet / 100) }
-  /** 金币获取倍率（房间制取消了经验，原经验词缀改为增益金币，避免属性失效） */
-  get goldMul() { return (1 + 0.15 * (this.passives.wisdom || 0)) * (1 + this.eq.xp / 100) }
-  get regen() { return 0.6 * (this.passives.regen || 0) + this.eq.regen }
-  get critChance() { return 0.05 + 0.08 * (this.passives.crit || 0) + this.eq.crit / 100 }
-  /** 伤害减免，上限 60% 防止无敌 */
-  get armorMul() { return 1 - Math.min(0.6, this.eq.armor / 100) }
+  // 局内道具(stats) × 局外装备(eq) 双层叠加
+  get spd() { return 72 * this.stats.moveSpd * (1 + this.eq.spd / 100) }
+  get magnetR() { return 28 * this.stats.magnet * (1 + this.eq.magnet / 100) }
+  get goldMul() { return this.stats.goldMul * (1 + this.eq.xp / 100) }
+  get regen() { return this.stats.regen + this.eq.regen }
+  get critChance() { return 0.05 + this.stats.crit + this.eq.crit / 100 }
+  /** 伤害减免，上限 70% 防止无敌 */
+  get armorMul() { return 1 - Math.min(0.7, this.stats.armor + this.eq.armor / 100) }
+  /** 弹体颜色随已拾取词条变化，让 build 在视觉上可辨认 */
+  get shotColor() {
+    const s = this.stats
+    if (s.explode > 1) return '#b98cff'
+    if (s.burn > 0) return '#ff7f3f'
+    if (s.freeze > 0) return '#8fd8ff'
+    if (s.chain > 0) return '#9fdcff'
+    if (s.homing > 0) return '#ff6b6b'
+    if (s.split > 0) return '#c78cff'
+    return '#ffd75e'
+  }
+
+  /** 道具图标按颜色生成并缓存，避免每帧重建 canvas */
+  private iconCache = new Map<string, HTMLCanvasElement>()
+  itemIcon(item: RunItem): HTMLCanvasElement {
+    let c = this.iconCache.get(item.id)
+    if (!c) { c = makeEmblem(item.color, '#ffffff'); this.iconCache.set(item.id, c) }
+    return c
+  }
+
+  /** 拾取道具后重算属性；生命上限变化要同步补血 */
+  addRunItem(item: RunItem) {
+    this.runItems.push(item.id)
+    const prevMax = this.stats.maxHp
+    this.stats = computeStats(this.runItems)
+    const gained = this.stats.maxHp - prevMax
+    this.maxHp = 100 + this.eq.maxHp + this.stats.maxHp
+    this.hp = Math.min(this.maxHp, this.hp + Math.max(0, gained))
+  }
 
   // 鼠标在房间局部坐标中的位置（房间制下相机固定，直接减去房间原点）
   get aimX() { return Input.mx - OX }
@@ -226,6 +230,9 @@ export class Game {
     this.t = 0; this.kills = 0; this.shake = 0
     this.px = ROOM_W / 2; this.py = ROOM_H / 2
     this.camX = 0; this.camY = 0
+    this.runItems = []
+    this.stats = baseStats()
+    this.fireT = 0; this.orbAng = 0; this.boltT = 0
     this.maxHp = 100 + this.eq.maxHp // 装备提供的生命上限
     this.hp = this.maxHp; this.invuln = 0
     this.runLoot = []; this.runGold = 0
@@ -233,11 +240,8 @@ export class Game {
     this.hitStop = 0; this.hurtFlash = 0
     this.depth = 1
     this.pedestal = null; this.trapdoor = null; this.boss = null
-    this.weapons = [{ id: 'knife', lv: 1, t: 0.2, evolved: false }]
-    this.passives = {}
-    this.enemies = []; this.projs = []; this.eprojs = []; this.gems = []; this.hearts = []
+    this.enemies = []; this.shots = []; this.eprojs = []; this.gems = []; this.hearts = []
     this.chests = []; this.novas = []; this.bolts = []; this.parts = []; this.floats = []
-    this.boomers = []; this.homers = []
     this.eid = 1
     this.win = false; this.newRecord = false
     // 生成第一层并进入起始房
@@ -259,8 +263,8 @@ export class Game {
     this.roomFlash = 0.25
 
     // 换房清场：残留弹体会打到下一间，属于串味
-    this.enemies = []; this.projs = []; this.eprojs = []
-    this.boomers = []; this.homers = []; this.novas = []; this.bolts = []
+    this.enemies = []; this.shots = []; this.eprojs = []
+    this.novas = []; this.bolts = []
     this.gems = []; this.hearts = []; this.chests = []
     this.grid.clear()
     this.boss = null
@@ -454,9 +458,9 @@ export class Game {
     }
   }
 
-  /** 宝箱房的道具台：从可用升级里抽一件 */
+  /** 宝箱房的道具台：抽一件局内道具 */
   makePedestal() {
-    this.pedestal = { x: ROOM_W / 2, y: ROOM_H / 2, choice: this.randomUpgrade() }
+    this.pedestal = { x: ROOM_W / 2, y: ROOM_H / 2, item: rollRunItem(this.stats.luck + this.depth * 2) }
   }
 
   /** 房间是否已清空（无存活敌人） */
@@ -696,10 +700,8 @@ export class Game {
     this.rebuildGrid()
     this.separateEnemies()
     this.updateWeapons(dt)
-    this.updateProjs(dt)
+    this.updateShots(dt)
     this.updateEProjs(dt)
-    this.updateBoomers(dt)
-    this.updateHomers(dt)
     this.updateNovas(dt)
     this.updatePickups(dt)
     this.updateChests(dt)
@@ -719,12 +721,14 @@ export class Game {
     const p = this.pedestal
     if (!p) return
     if (dist2(p.x, p.y, this.px, this.py) < 13 * 13) {
-      this.applyChoice(p.choice)
+      this.addRunItem(p.item)
       this.room.looted = true
       this.pedestal = null
-      this.burst(p.x, p.y, '#ffd75e', 20)
-      this.float(p.x, p.y - 22, `获得 ${p.choice.def.name}！`, '#ffd75e', 11)
-      this.hitStop = 0.1
+      this.burst(p.x, p.y, p.item.color, 22)
+      this.float(p.x, p.y - 22, `获得 ${p.item.name}！`, p.item.color, 11)
+      this.float(p.x, p.y - 10, p.item.desc, '#ffffff', 8)
+      this.hitStop = 0.12
+      this.shake = 0.4
       sfx.levelup()
     }
   }
@@ -771,7 +775,7 @@ export class Game {
       x, y,
       hp: base.hp * hpScale, maxHp: base.hp * hpScale,
       spd: base.spd * rand(0.9, 1.1), dmg: base.dmg * dmgScale,
-      r: base.r, xp: base.xp, scale: base.scale, spawnScale: 0, deathT: 0, splits: 0,
+      r: base.r, xp: base.xp, scale: base.scale, spawnScale: 0, deathT: 0, splits: 0, slow: 0,
       flash: 0, auraCd: 0, orbCd: 0,
       burn: 0, burnT: 0,
       atkT: rand(1.5, 3),
@@ -914,6 +918,12 @@ export class Game {
         }
       }
 
+      // 寒霜减速
+      if (e.slow > 0) {
+        e.slow -= dt
+        spd *= 1 - this.stats.freeze
+      }
+
       e.x += moveX * spd * dt
       e.y += moveY * spd * dt
     }
@@ -965,211 +975,230 @@ export class Game {
   }
 
   // ---------- 武器 ----------
+  // ================================================================
+  // 统一射击系统：一发基础弹 + 所有道具修饰叠加
+  // ================================================================
   updateWeapons(dt: number) {
-    for (const w of this.weapons) {
-      if (w.id === 'orb') {
-        // w.t 作为旋转角度累加器
-        w.t += dt * (2.2 + 0.15 * w.lv) * (w.evolved ? 1.4 : 1)
-        const count = w.evolved ? 6 + w.lv : 1 + w.lv
-        const radius = (30 + w.lv * 2) * (w.evolved ? 1.35 : 1)
-        const dmg = (6 + 3 * w.lv) * this.dmgMul * (w.evolved ? 1.7 : 1)
-        for (let i = 0; i < count; i++) {
-          const a = w.t + (Math.PI * 2 * i) / count
-          const ox = this.px + Math.cos(a) * radius
-          const oy = this.py + Math.sin(a) * radius
-          this.forEachNear(ox, oy, 8, e => {
-            if (e.orbCd <= 0 && dist2(ox, oy, e.x, e.y) < (6 + e.r) ** 2) {
-              e.orbCd = 0.4
-              this.damage(e, dmg)
-            }
-          })
-        }
-        continue
-      }
-      if (w.id === 'aura') {
-        const radius = (24 + 5 * w.lv) * (w.evolved ? 1.5 : 1)
-        const dmg = (4 + 2.5 * w.lv) * this.dmgMul * (w.evolved ? 1.6 : 1)
-        this.forEachNear(this.px, this.py, radius + 12, e => {
-          if (e.auraCd <= 0 && dist2(this.px, this.py, e.x, e.y) < (radius + e.r) ** 2) {
-            e.auraCd = 0.35
+    const st = this.stats
+
+    // ---- 主武器：朝鼠标开火 ----
+    this.fireT -= dt
+    if (this.fireT <= 0) {
+      this.fireT = 0.5 / Math.max(0.15, st.rate)
+      this.fireShot()
+    }
+
+    // ---- 环绕法球 ----
+    if (st.orbit > 0) {
+      this.orbAng += dt * 2.6
+      const radius = 34 + st.orbit * 1.5
+      const dmg = 9 * st.dmg
+      for (let i = 0; i < st.orbit; i++) {
+        const a = this.orbAng + (Math.PI * 2 * i) / st.orbit
+        const ox = this.px + Math.cos(a) * radius
+        const oy = this.py + Math.sin(a) * radius
+        this.forEachNear(ox, oy, 10, e => {
+          if (e.orbCd <= 0 && dist2(ox, oy, e.x, e.y) < (7 + e.r) ** 2) {
+            e.orbCd = 0.35
             this.damage(e, dmg)
-            if (w.evolved) { e.burn = 3; e.burnT = 0 } // 炼狱：留下持续燃烧
           }
         })
-        continue
       }
-      w.t -= dt
-      if (w.t > 0) continue
-      if (w.id === 'knife') {
-        w.t = 0.85 * this.cdMul * (w.evolved ? 0.7 : 1)
-        const dmg = (8 + 3 * (w.lv - 1)) * this.dmgMul * (w.evolved ? 1.5 : 1)
-        if (w.evolved) {
-          // 千刃风暴：八方齐射
-          for (let i = 0; i < 10; i++) {
-            const a = (Math.PI * 2 * i) / 10 + rand(-0.1, 0.1)
-            this.projs.push({ x: this.px, y: this.py, vx: Math.cos(a) * 270, vy: Math.sin(a) * 270, dmg, life: 1.2, pierce: 3, angle: a })
-          }
-        } else {
-          const count = [1, 2, 2, 3, 4][w.lv - 1]
-          const baseA = this.aimAngle // 朝鼠标方向发射
-          for (let i = 0; i < count; i++) {
-            const a = baseA + (i - (count - 1) / 2) * 0.16
-            this.projs.push({
-              x: this.px, y: this.py,
-              vx: Math.cos(a) * 260, vy: Math.sin(a) * 260,
-              dmg, life: 1.3, pierce: w.lv >= 4 ? 2 : 1, angle: a,
-            })
-          }
+    }
+
+    // ---- 灼热光环 ----
+    if (st.aura > 0) {
+      const radius = 34 + st.aura * 0.8
+      this.forEachNear(this.px, this.py, radius + 12, e => {
+        if (e.auraCd <= 0 && dist2(this.px, this.py, e.x, e.y) < (radius + e.r) ** 2) {
+          e.auraCd = 0.35
+          this.damage(e, st.aura * 0.35 * st.dmg)
+          if (st.burn > 0) { e.burn = Math.max(e.burn, st.burn); e.burnT = 0 }
         }
-        sfx.shoot()
-      } else if (w.id === 'nova') {
-        w.t = 3.4 * this.cdMul * (w.evolved ? 0.75 : 1)
-        const maxR = (58 + 11 * w.lv) * (w.evolved ? 1.7 : 1)
-        const dmg = (10 + 6 * w.lv) * this.dmgMul * (w.evolved ? 1.8 : 1)
-        this.novas.push({ x: this.px, y: this.py, r: 8, maxR, dmg, hit: new Set() })
-        if (w.evolved) this.novas.push({ x: this.px, y: this.py, r: 2, maxR: maxR * 0.6, dmg: dmg * 0.7, hit: new Set() })
-        sfx.nova()
-      } else if (w.id === 'bolt') {
-        w.t = 2.3 * this.cdMul * (w.evolved ? 0.65 : 1)
-        const n = w.evolved ? 7 : 1 + Math.floor((w.lv - 1) / 2)
-        const dmg = (16 + 8 * w.lv) * this.dmgMul * (w.evolved ? 1.4 : 1)
-        const inRange = this.enemies.filter(e => !e.dead && dist2(e.x, e.y, this.px, this.py) < 220 * 220)
-        for (let i = 0; i < n && inRange.length > 0; i++) {
+      })
+    }
+
+    // ---- 雷云 ----
+    if (st.bolt > 0) {
+      this.boltT -= dt
+      if (this.boltT <= 0) {
+        this.boltT = 1 / st.bolt
+        const inRange = this.enemies.filter(e => !e.dead && dist2(e.x, e.y, this.px, this.py) < 240 * 240)
+        if (inRange.length) {
           const e = pick(inRange)
-          // 锯齿闪电路径
-          const pts: number[] = []
-          const sx = e.x + rand(-6, 6), sy = e.y - 90
-          for (let k = 0; k <= 5; k++) {
-            const tt = k / 5
-            pts.push(sx + (e.x - sx) * tt + (k > 0 && k < 5 ? rand(-7, 7) : 0), sy + (e.y - sy) * tt)
-          }
-          this.bolts.push({ pts, life: 0.18 })
-          this.damage(e, dmg)
-          this.forEachNear(e.x, e.y, 16, o => {
-            if (o !== e && dist2(o.x, o.y, e.x, e.y) < 16 * 16) this.damage(o, dmg * 0.5)
-          })
+          this.strikeBolt(e.x, e.y, 26 * st.dmg)
+          sfx.zap()
         }
-        if (inRange.length > 0) sfx.zap()
-      } else if (w.id === 'boomer') {
-        w.t = 1.7 * this.cdMul * (w.evolved ? 0.7 : 1)
-        const dmg = (7 + 3 * w.lv) * this.dmgMul * (w.evolved ? 1.5 : 1)
-        const shots = w.evolved ? 3 : 1
-        const baseA = this.aimAngle // 朝鼠标方向掷出
-        const out = 0.42 + 0.03 * w.lv
-        for (let i = 0; i < shots; i++) {
-          const a = baseA + (i - (shots - 1) / 2) * 0.5
-          this.boomers.push({ x: this.px, y: this.py, vx: Math.cos(a) * 230, vy: Math.sin(a) * 230, t: 0, out, back: false, dmg, hit: new Set(), ang: 0 })
-        }
-        sfx.shoot()
-      } else if (w.id === 'homing') {
-        w.t = 0.95 * this.cdMul * (w.evolved ? 0.6 : 1)
-        const dmg = (6 + 3 * w.lv) * this.dmgMul * (w.evolved ? 1.5 : 1)
-        const shots = w.evolved ? 3 : 1 + Math.floor((w.lv - 1) / 2)
-        // 朝鼠标方向散射发射，之后自行追踪
-        for (let i = 0; i < shots; i++) {
-          const a = this.aimAngle + rand(-0.45, 0.45)
-          this.homers.push({ x: this.px, y: this.py, vx: Math.cos(a) * 110, vy: Math.sin(a) * 110, life: 2.6, dmg, pierce: w.evolved ? 2 : 1, targetId: -1 })
-        }
-        sfx.shoot()
       }
     }
   }
 
-  // ---------- 回旋刃：飞出一段后飞回玩家，两趟都能命中 ----------
-  updateBoomers(dt: number) {
-    for (const b of this.boomers) {
-      b.t += dt
-      b.ang += dt * 20 // 自旋
-      if (!b.back) {
-        b.x += b.vx * dt
-        b.y += b.vy * dt
-        if (b.t >= b.out) { b.back = true; b.hit.clear() } // 折返，允许再次命中
-      } else {
-        const dx = this.px - b.x, dy = this.py - b.y
-        const d = Math.hypot(dx, dy) || 1
-        b.x += (dx / d) * 280 * dt
-        b.y += (dy / d) * 280 * dt
-        if (d < 10) b.t = 999 // 回到手中，移除
+  /** 按当前属性打出一轮弹幕 */
+  fireShot() {
+    const st = this.stats
+    const n = 1 + Math.floor(st.count)
+    const base = this.aimAngle
+    const dmg = 9 * st.dmg
+    for (let i = 0; i < n; i++) {
+      const a = base + (i - (n - 1) / 2) * st.spread + rand(-0.02, 0.02)
+      this.spawnShot(this.px, this.py, a, dmg, st)
+    }
+    sfx.shoot()
+  }
+
+  spawnShot(x: number, y: number, ang: number, dmg: number, st: RunStats, splitLeft?: number) {
+    if (this.shots.length > 260) return // 上限保护：分裂+弹射可能指数增长
+    const sp = 250 * st.speed
+    this.shots.push({
+      x, y,
+      vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+      dmg,
+      life: 1.3 * st.range,
+      pierce: st.pierce,
+      bounce: st.bounce,
+      split: splitLeft !== undefined ? splitLeft : st.split,
+      size: 3.5 * st.size,
+      hit: new Set(),
+      targetId: -1,
+    })
+  }
+
+  /** 落雷：锯齿路径 + 范围伤害 */
+  strikeBolt(x: number, y: number, dmg: number) {
+    const pts: number[] = []
+    const sx = x + rand(-6, 6), sy = y - 90
+    for (let k = 0; k <= 5; k++) {
+      const tt = k / 5
+      pts.push(sx + (x - sx) * tt + (k > 0 && k < 5 ? rand(-7, 7) : 0), sy + (y - sy) * tt)
+    }
+    this.bolts.push({ pts, life: 0.18 })
+    this.forEachNear(x, y, 20, o => {
+      if (dist2(o.x, o.y, x, y) < 20 * 20) this.damage(o, dmg)
+    })
+  }
+
+  // ---------- 统一弹体更新：追踪 / 弹射 / 穿透 / 分裂 / 爆炸 / 连锁 ----------
+  updateShots(dt: number) {
+    const st = this.stats
+    for (const p of this.shots) {
+      p.life -= dt
+      if (p.life <= 0) continue
+
+      // 追踪：朝锁定目标转向
+      if (st.homing > 0) {
+        let target: Enemy | null = this.enemies.find(e => e.id === p.targetId && !e.dead) ?? null
+        if (!target) {
+          target = this.nearestTo(p.x, p.y, 220)
+          p.targetId = target ? target.id : -1
+        }
+        if (target) {
+          const dx = target.x - p.x, dy = target.y - p.y
+          const d = Math.hypot(dx, dy) || 1
+          const sp = Math.hypot(p.vx, p.vy) || 1
+          const turn = Math.min(1, 4.5 * st.homing * dt)
+          p.vx += ((dx / d) * sp - p.vx) * turn
+          p.vy += ((dy / d) * sp - p.vy) * turn
+        }
       }
-      this.forEachNear(b.x, b.y, 12, e => {
-        if (b.hit.has(e.id)) return
-        if (dist2(b.x, b.y, e.x, e.y) < (7 + e.r) ** 2) {
-          b.hit.add(e.id)
-          this.damage(e, b.dmg)
-          if (chance(0.3)) sfx.hit()
+
+      p.x += p.vx * dt
+      p.y += p.vy * dt
+
+      // 撞墙反弹
+      if (p.x < 0 || p.x > ROOM_W) {
+        if (p.bounce > 0) { p.bounce--; p.vx = -p.vx; p.x = clamp(p.x, 0, ROOM_W); p.hit.clear() }
+        else { p.life = 0; continue }
+      }
+      if (p.y < 0 || p.y > ROOM_H) {
+        if (p.bounce > 0) { p.bounce--; p.vy = -p.vy; p.y = clamp(p.y, 0, ROOM_H); p.hit.clear() }
+        else { p.life = 0; continue }
+      }
+
+      // 撞石块：能弹就弹，不能弹就碎
+      if (this.hitObstacle(p.x, p.y, p.dmg)) {
+        if (p.bounce > 0) {
+          p.bounce--
+          // 按穿透深度较浅的轴反弹
+          if (Math.abs(p.vx) > Math.abs(p.vy)) p.vx = -p.vx
+          else p.vy = -p.vy
+          p.x += p.vx * dt * 2
+          p.y += p.vy * dt * 2
+          p.hit.clear()
+        } else { p.life = 0; continue }
+      }
+
+      // 命中敌人
+      this.forEachNear(p.x, p.y, p.size + 12, e => {
+        if (p.life <= 0 || e.dead || p.hit.has(e.id)) return
+        if (dist2(p.x, p.y, e.x, e.y) < (p.size + e.r) ** 2) {
+          p.hit.add(e.id)
+          this.onShotHit(p, e, st)
+          if (p.pierce > 0) p.pierce--
+          else p.life = 0
         }
       })
     }
-    this.boomers = this.boomers.filter(b => b.t < 6)
+    this.shots = this.shots.filter(p => p.life > 0)
   }
 
-  // ---------- 追踪飞弹：转向锁定的目标 ----------
-  updateHomers(dt: number) {
-    for (const h of this.homers) {
-      h.life -= dt
-      if (h.life <= 0) continue
-      let target: Enemy | null = this.enemies.find(e => e.id === h.targetId && !e.dead) ?? null
-      if (!target) { target = this.nearestEnemy(9999); h.targetId = target ? target.id : -1 }
-      if (target) {
-        const dx = target.x - h.x, dy = target.y - h.y
-        const d = Math.hypot(dx, dy) || 1
-        const sp = 210
-        const turn = Math.min(1, 6 * dt)
-        h.vx += (dx / d * sp - h.vx) * turn
-        h.vy += (dy / d * sp - h.vy) * turn
-      }
-      h.x += h.vx * dt
-      h.y += h.vy * dt
-      if (this.hitObstacle(h.x, h.y, h.dmg)) { h.life = 0; continue }
-      this.forEachNear(h.x, h.y, 10, e => {
-        if (h.pierce <= 0 || e.dead) return
-        if (dist2(h.x, h.y, e.x, e.y) < (4 + e.r) ** 2) {
-          h.pierce--
-          this.damage(e, h.dmg)
-          if (h.pierce <= 0) h.life = 0
-          if (chance(0.3)) sfx.hit()
+  /** 弹体命中敌人时结算所有附加效果 */
+  onShotHit(p: Shot, e: Enemy, st: RunStats) {
+    this.damage(e, p.dmg)
+    if (chance(0.3)) sfx.hit()
+
+    // 点燃
+    if (st.burn > 0) { e.burn = Math.max(e.burn, st.burn); e.burnT = 0 }
+    // 冰冻减速
+    if (st.freeze > 0) e.slow = 1.6
+    // 击退
+    if (!e.dead) {
+      const kb = e.kind === 'boss' ? 1 : e.kind === 'elite' ? 3 : 6
+      const ang = Math.atan2(e.y - p.y, e.x - p.x)
+      e.x += Math.cos(ang) * kb
+      e.y += Math.sin(ang) * kb
+    }
+    // 爆炸
+    if (st.explode > 0) {
+      const r = 26 + st.explode * 14
+      const ed = p.dmg * st.explode
+      this.novas.push({ x: p.x, y: p.y, r: 4, maxR: r, dmg: ed, hit: new Set() })
+      this.burst(p.x, p.y, '#ff9f4f', 10)
+      this.shake = Math.max(this.shake, 0.2)
+      sfx.nova()
+    }
+    // 闪电链
+    if (st.chain > 0) {
+      let n = st.chain
+      this.forEachNear(p.x, p.y, 70, o => {
+        if (n <= 0 || o === e || o.dead) return
+        if (dist2(o.x, o.y, p.x, p.y) < 70 * 70) {
+          n--
+          this.bolts.push({ pts: [p.x, p.y, o.x, o.y], life: 0.12 })
+          this.damage(o, p.dmg * 0.55)
         }
       })
     }
-    this.homers = this.homers.filter(h => h.life > 0)
+    // 分裂
+    if (p.split > 0) {
+      const baseA = Math.atan2(p.vy, p.vx)
+      for (let i = 0; i < 2; i++) {
+        const a = baseA + (i === 0 ? 0.7 : -0.7)
+        this.spawnShot(p.x, p.y, a, p.dmg * 0.6, st, p.split - 1)
+      }
+    }
+    // 吸血
+    if (st.vamp > 0) this.hp = Math.min(this.maxHp, this.hp + p.dmg * st.vamp)
   }
 
-  nearestEnemy(maxDist: number): Enemy | null {
+  nearestTo(x: number, y: number, maxDist: number): Enemy | null {
     let best: Enemy | null = null
     let bd = maxDist * maxDist
     for (const e of this.enemies) {
       if (e.dead) continue
-      const d = dist2(e.x, e.y, this.px, this.py)
+      const d = dist2(e.x, e.y, x, y)
       if (d < bd) { bd = d; best = e }
     }
     return best
-  }
-
-  updateProjs(dt: number) {
-    for (const p of this.projs) {
-      p.x += p.vx * dt
-      p.y += p.vy * dt
-      p.life -= dt
-      if (p.life <= 0) continue
-      // 撞石头：弹体消耗掉，石头掉血
-      if (this.hitObstacle(p.x, p.y, p.dmg)) { p.life = 0; continue }
-      this.forEachNear(p.x, p.y, 10, e => {
-        if (p.pierce <= 0 || e.dead) return
-        if (dist2(p.x, p.y, e.x, e.y) < (4 + e.r) ** 2) {
-          p.pierce--
-          this.damage(e, p.dmg)
-          if (!e.dead) {
-            const kb = e.kind === 'boss' ? 1 : e.kind === 'elite' ? 3 : 6
-            const ang = Math.atan2(e.y - p.y, e.x - p.x)
-            e.x += Math.cos(ang) * kb
-            e.y += Math.sin(ang) * kb
-          }
-          if (chance(0.35)) sfx.hit()
-        }
-      })
-      if (p.pierce <= 0) p.life = 0
-    }
-    this.projs = this.projs.filter(p => p.life > 0)
   }
 
   // ---------- 敌方弹体（骷髅骨头 / Boss 火球） ----------
@@ -1347,9 +1376,11 @@ export class Game {
         c.opened = 0.01 // 触发开箱动画（渐进到 1）
         sfx.levelup()
         this.burst(c.x, c.y, '#ffd75e', 14)
-        const ch = this.randomUpgrade()
-        this.applyChoice(ch)
-        this.float(c.x, c.y - 20, `获得 ${ch.def.name}！`, '#ffd75e', 10)
+        const it = rollRunItem(this.stats.luck + this.depth * 2)
+        this.addRunItem(it)
+        this.burst(c.x, c.y, it.color, 16)
+        this.float(c.x, c.y - 20, `获得 ${it.name}！`, it.color, 10)
+        this.float(c.x, c.y - 8, it.desc, '#ffffff', 8)
       }
     }
     for (const c of this.chests) if (c.opened > 0 && c.opened < 1) c.opened = Math.min(1, c.opened + dt * 4)
@@ -1358,65 +1389,6 @@ export class Game {
   gainCoin(v: number) {
     this.runGold += Math.max(1, Math.round(v * this.goldMul))
     sfx.pickup()
-  }
-
-  /** 从当前还能升的东西里随机抽一件 */
-  randomUpgrade(): Choice {
-    const pool: Choice[] = []
-    for (const def of UPG) {
-      if (def.type === 'weapon') {
-        const ws = this.weapons.find(w => w.id === def.id)
-        if (ws) {
-          if (ws.lv < def.maxLv) pool.push({ def, lv: ws.lv + 1 })
-        } else if (this.weapons.length < 4) pool.push({ def, lv: 1 })
-      } else {
-        const l = this.passives[def.id] || 0
-        if (l < def.maxLv) pool.push({ def, lv: l + 1 })
-      }
-    }
-    return pool.length ? pick(pool) : { def: SNACK, lv: 1 }
-  }
-
-  // 武器满级 + 对应被动 → 可进化
-  evolvable(w: WeaponState): boolean {
-    const evo = EVO[w.id]
-    return !!evo && w.lv >= 5 && !w.evolved && (this.passives[evo.need] || 0) >= 1
-  }
-
-  applyChoice(c: Choice) {
-    const { def } = c
-    if (def.type === 'weapon') {
-      const ws = this.weapons.find(w => w.id === def.id)
-      if (ws) {
-        ws.lv = c.lv
-        if (this.evolvable(ws)) this.evolve(ws)
-      } else {
-        const nw: WeaponState = { id: def.id, lv: 1, t: 0, evolved: false }
-        this.weapons.push(nw)
-        if (this.evolvable(nw)) this.evolve(nw)
-      }
-    } else if (def.type === 'passive') {
-      this.passives[def.id] = c.lv
-      if (def.id === 'vital') {
-        this.maxHp += 25
-        this.hp = Math.min(this.maxHp, this.hp + 25)
-      }
-      // 新增被动可能让满级武器解锁进化
-      for (const w of this.weapons) if (this.evolvable(w)) this.evolve(w)
-    } else {
-      this.hp = Math.min(this.maxHp, this.hp + 40)
-      sfx.heal()
-    }
-  }
-
-  evolve(w: WeaponState) {
-    w.evolved = true
-    const evo = EVO[w.id]
-    this.float(this.px, this.py - 36, `武器进化：${evo.name}！`, '#ffd75e', 11)
-    this.burst(this.px, this.py, '#ffd75e', 24)
-    sfx.win()
-    this.shake = 0.6
-    this.hitStop = 0.12 // 进化顿帧
   }
 
   // ================================================================
@@ -1675,22 +1647,17 @@ export class Game {
     const W = (wx: number) => OX + sx + wx
     const H = (wy: number) => OY + sy + wy
 
-    // 灼热光环 / 炼狱（在敌人下层）
-    const aura = this.weapons.find(w => w.id === 'aura')
-    if (aura) {
-      const r = (24 + 5 * aura.lv) * (aura.evolved ? 1.5 : 1)
-      const col = aura.evolved ? 'rgba(255,90,40,' : 'rgba(255,127,63,'
-      g.fillStyle = col + '0.10)'
+    // 灼热光环（在敌人下层）
+    if (this.stats.aura > 0) {
+      const r = 34 + this.stats.aura * 0.8
+      g.fillStyle = 'rgba(255,127,63,0.10)'
       g.beginPath(); g.arc(W(this.px), H(this.py), r, 0, Math.PI * 2); g.fill()
-      g.strokeStyle = col + '0.4)'
+      g.strokeStyle = 'rgba(255,127,63,0.4)'
       g.lineWidth = 1
       g.beginPath(); g.arc(W(this.px), H(this.py), r, 0, Math.PI * 2); g.stroke()
-      if (aura.evolved) {
-        // 炼狱火焰粒子
-        if (chance(0.5)) {
-          const a = rand(Math.PI * 2)
-          this.parts.push({ x: this.px + Math.cos(a) * r * 0.9, y: this.py + Math.sin(a) * r * 0.9, vx: rand(-6, 6), vy: -24, life: 0.5, maxLife: 0.5, color: '#ff6b35', size: 1 })
-        }
+      if (chance(0.5)) {
+        const a = rand(Math.PI * 2)
+        this.parts.push({ x: this.px + Math.cos(a) * r * 0.9, y: this.py + Math.sin(a) * r * 0.9, vx: rand(-6, 6), vy: -24, life: 0.5, maxLife: 0.5, color: '#ff6b35', size: 1 })
       }
     }
 
@@ -1765,17 +1732,17 @@ export class Game {
       g.fillStyle = '#5c6285'
       g.fillRect(Math.round(W(ped.x) - 9), Math.round(H(ped.y) + 7), 18, 3)
       // 悬浮的道具图标
-      this.glow(W(ped.x), H(ped.y) - 6 + bob, 16, '#ffd75e', 0.5)
-      const icon = SPR[ped.choice.def.icon]
+      this.glow(W(ped.x), H(ped.y) - 6 + bob, 18, ped.item.color, 0.6)
+      const icon = this.itemIcon(ped.item)
       const isc = 2
       g.drawImage(icon, Math.round(W(ped.x) - icon.width * isc / 2), Math.round(H(ped.y) - 10 + bob - icon.height * isc / 2), icon.width * isc, icon.height * isc)
       g.textAlign = 'center'
       g.font = 'bold 8px monospace'
-      g.fillStyle = '#ffd75e'
-      g.fillText(ped.choice.def.name, W(ped.x), H(ped.y) - 24)
+      g.fillStyle = ped.item.color
+      g.fillText(ped.item.name, W(ped.x), H(ped.y) - 24)
       g.font = '7px monospace'
       g.fillStyle = '#9aa4c8'
-      g.fillText(ped.choice.def.desc, W(ped.x), H(ped.y) + 22)
+      g.fillText(ped.item.desc, W(ped.x), H(ped.y) + 22)
     }
 
     // 宝箱
@@ -1870,48 +1837,28 @@ export class Game {
       g.filter = 'none'
     }
 
-    // 环绕法球
-    const orb = this.weapons.find(w => w.id === 'orb')
-    if (orb) {
-      const count = orb.evolved ? 6 + orb.lv : 1 + orb.lv
-      const radius = (30 + orb.lv * 2) * (orb.evolved ? 1.35 : 1)
-      for (let i = 0; i < count; i++) {
-        const a = orb.t + (Math.PI * 2 * i) / count
+    // 环绕法球（数量与半径同步 updateWeapons，避免画的和打的不一致）
+    if (this.stats.orbit > 0) {
+      const radius = 34 + this.stats.orbit * 1.5
+      for (let i = 0; i < this.stats.orbit; i++) {
+        const a = this.orbAng + (Math.PI * 2 * i) / this.stats.orbit
         const ox = W(this.px + Math.cos(a) * radius), oy = H(this.py + Math.sin(a) * radius)
-        this.glow(ox, oy, 9, orb.evolved ? '#ff7bff' : '#e05be0', 0.55)
+        this.glow(ox, oy, 9, '#e05be0', 0.55)
         this.blit(SPR.orb, ox, oy)
       }
     }
 
-    // 飞刀
-    for (const p of this.projs) {
-      g.save()
-      g.translate(W(p.x), H(p.y))
-      g.rotate(p.angle)
-      g.drawImage(SPR.knife, -4, -1)
-      g.restore()
-    }
-
-    // 回旋刃（快速自旋）
-    for (const b of this.boomers) {
-      g.save()
-      g.translate(W(b.x), H(b.y))
-      g.rotate(b.ang)
-      g.drawImage(SPR.knife, -4, -1)
-      g.restore()
-    }
-
-    // 追踪飞弹（朝速度方向的箭头 + 辉光 + 拖尾）
-    for (const h of this.homers) {
-      const ang = Math.atan2(h.vy, h.vx)
-      this.glow(W(h.x), H(h.y), 8, '#ff6b6b', 0.5)
-      g.save()
-      g.translate(W(h.x), H(h.y))
-      g.rotate(ang)
-      g.fillStyle = '#ff6b6b'
-      g.beginPath(); g.moveTo(4, 0); g.lineTo(-3, -2); g.lineTo(-3, 2); g.closePath(); g.fill()
-      g.restore()
-      if (chance(0.5)) this.parts.push({ x: h.x, y: h.y, vx: 0, vy: 0, life: 0.2, maxLife: 0.2, color: '#ff9f6b', size: 1 })
+    // 主武器弹体：颜色随词条变化，带辉光与拖尾
+    const shotCol = this.shotColor
+    for (const p of this.shots) {
+      this.glow(W(p.x), H(p.y), p.size * 3.2, shotCol, 0.5)
+      g.fillStyle = shotCol
+      g.beginPath(); g.arc(W(p.x), H(p.y), p.size, 0, Math.PI * 2); g.fill()
+      g.fillStyle = '#ffffff'
+      g.beginPath(); g.arc(W(p.x) - p.size * 0.25, H(p.y) - p.size * 0.25, p.size * 0.42, 0, Math.PI * 2); g.fill()
+      if (chance(0.35)) {
+        this.parts.push({ x: p.x, y: p.y, vx: 0, vy: 0, life: 0.18, maxLife: 0.18, color: shotCol, size: 1 })
+      }
     }
 
     // 新星（带辉光环）
@@ -2197,23 +2144,28 @@ export class Game {
       g.font = '9px monospace'
       g.fillText('WASD 移动 · 鼠标瞄准 · Space/Shift 冲刺 · 清空房间开门', VW / 2, VH - 28)
     }
-    // 武器栏（左上角，已进化高亮）
+    // 已拾取道具栏（左下角，重复的道具叠加显示数量）
+    const counts = new Map<string, number>()
+    for (const id of this.runItems) counts.set(id, (counts.get(id) || 0) + 1)
     let wx = 4
-    const wy = 20
-    for (const w of this.weapons) {
-      const def = UPG.find(u => u.id === w.id)
-      const icon = SPR[def?.icon || 'knife']
-      g.fillStyle = w.evolved ? 'rgba(255,215,94,0.25)' : 'rgba(23,26,46,0.8)'
-      g.fillRect(wx, wy, 16, 16)
-      g.strokeStyle = w.evolved ? '#ffd75e' : '#3a3f66'
-      g.strokeRect(wx + 0.5, wy + 0.5, 15, 15)
-      const isc = 1.6
-      g.drawImage(icon, wx + 2, wy + 2, icon.width * isc, icon.height * isc)
-      g.font = '6px monospace'
-      g.textAlign = 'right'
-      g.fillStyle = '#ffffff'
-      g.fillText(w.evolved ? 'E' : String(w.lv), wx + 15, wy + 15)
-      wx += 19
+    const wy = VH - 40
+    for (const [id, n] of counts) {
+      const item = ITEM_BY_ID.get(id)
+      if (!item) continue
+      g.fillStyle = 'rgba(23,26,46,0.85)'
+      g.fillRect(wx, wy, 15, 15)
+      g.strokeStyle = item.color
+      g.strokeRect(wx + 0.5, wy + 0.5, 14, 14)
+      const icon = this.itemIcon(item)
+      g.drawImage(icon, wx + 3, wy + 3, 9, 9)
+      if (n > 1) {
+        g.font = '6px monospace'
+        g.textAlign = 'right'
+        g.fillStyle = '#ffffff'
+        g.fillText(String(n), wx + 14, wy + 14)
+      }
+      wx += 17
+      if (wx > VW - 120) break // 道具太多时不挤爆 HUD
     }
     // 冲刺冷却（HP 条上方小条）
     const dcw = 30
@@ -2287,11 +2239,11 @@ export class Game {
     g.font = '10px monospace'
     g.fillStyle = '#ffffff'
     g.fillText(`第 ${this.depth} 层  ·  存活 ${fmtTime(this.t)}  ·  击杀 ${this.kills}`, cx, y); y += 16
-    const evoCount = this.weapons.filter(w => w.evolved).length
-    if (evoCount > 0) {
+    const itemCount = this.runItems.length
+    if (itemCount > 0) {
       g.fillStyle = '#ffd75e'
       g.font = '9px monospace'
-      g.fillText(`武器进化 ${evoCount} 件`, cx, y); y += 14
+      g.fillText(`拾取道具 ${itemCount} 件`, cx, y); y += 14
     }
     if (this.newRecord) {
       g.fillStyle = '#57e6a0'
