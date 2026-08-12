@@ -6,6 +6,7 @@ import { clamp, rand, pick, chance, dist2, fmtTime } from './util'
 import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, fmtMod, fmtStat, StatKey } from './items'
 import { Profile, loadProfile, saveProfile, INV_CAP } from './save'
 import { Floor, RoomDef, Dir, DIRS, DIR_LIST, genFloor, rkey, hasDoor } from './rooms'
+import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
 
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
 const ENEMY_DRAW_SCALE: Record<string, number> = { slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6 }
@@ -20,6 +21,15 @@ const OX = 32 // 房间在画布上的左上角
 const OY = 52
 const DOOR_HALF = 26 // 门洞半宽
 const WALL = 10
+// 地形格在房间内居中摆放
+const OBX = (ROOM_W - OB_COLS * OB_CELL) / 2
+const OBY = (ROOM_H - OB_ROWS * OB_CELL) / 2
+// 中央十字：必须保持可通行，否则会把玩家和门隔开
+const CROSS_COL = Math.round((ROOM_W / 2 - OBX) / OB_CELL - 0.5)
+const CROSS_ROW = Math.round((ROOM_H / 2 - OBY) / OB_CELL - 0.5)
+
+type ObKind = 'rock' | 'spike' | 'pit'
+interface Ob { col: number; row: number; kind: ObKind; hp: number; maxHp: number; flash: number }
 
 type State = 'menu' | 'hub' | 'inventory' | 'play' | 'pause' | 'end'
 
@@ -173,6 +183,11 @@ export class Game {
   /** Boss 被击败后出现的通往下一层的地板洞 */
   trapdoor: { x: number; y: number } | null = null
   roomFlash = 0 // 进房过渡
+  /** 每间房的地形，按房间 key 存，离开再回来保持一致（石头打碎了就是碎了） */
+  roomObs = new Map<string, Ob[]>()
+  /** 当前房间地形的格子索引，O(1) 查询碰撞 */
+  obGrid: (Ob | null)[] = []
+  spikeCd = 0 // 尖刺伤害间隔
 
   constructor() {
     this.cv.width = VW
@@ -226,6 +241,7 @@ export class Game {
     this.eid = 1
     this.win = false; this.newRecord = false
     // 生成第一层并进入起始房
+    this.roomObs.clear()
     this.floor = genFloor(1)
     this.enterRoom(this.floor.startKey, null)
   }
@@ -262,6 +278,8 @@ export class Game {
       this.py = ROOM_H / 2
     }
 
+    this.buildObstacles(r)
+
     if (!r.spawned) {
       r.spawned = true
       this.populateRoom(r)
@@ -269,6 +287,135 @@ export class Game {
     // Boss 房清完之后回来，要保证地板洞还在
     if (r.type === 'boss' && r.cleared) this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
     if (r.type === 'treasure' && !r.looted) this.makePedestal()
+  }
+
+  // ---------- 地形 ----------
+  /** 生成/恢复当前房间的地形，并建好碰撞索引 */
+  buildObstacles(r: RoomDef) {
+    const key = rkey(r.gx, r.gy)
+    let list = this.roomObs.get(key)
+    if (!list) {
+      list = []
+      // Boss 房和宝箱房保持空旷，避免挡住 Boss 弹幕和道具台
+      if (r.type === 'normal') {
+        const tpl = LAYOUTS[r.seed % LAYOUTS.length]
+        for (let row = 0; row < OB_ROWS; row++) {
+          for (let col = 0; col < OB_COLS; col++) {
+            const ch = tpl[row][col]
+            const kind: ObKind | null = ch === '#' ? 'rock' : ch === '^' ? 'spike' : ch === 'o' ? 'pit' : null
+            if (!kind) continue
+            // 中央十字上的阻挡类地形一律清除，保证四门到中心恒通
+            if ((col === CROSS_COL || row === CROSS_ROW) && kind !== 'spike') continue
+            const hp = 26 + this.depth * 6
+            list.push({ col, row, kind, hp, maxHp: hp, flash: 0 })
+          }
+        }
+      }
+      this.roomObs.set(key, list)
+    }
+    // 建索引
+    this.obGrid = new Array(OB_COLS * OB_ROWS).fill(null)
+    for (const o of list) this.obGrid[o.row * OB_COLS + o.col] = o
+  }
+
+  get obs(): Ob[] { return this.roomObs.get(this.curKey) || [] }
+  obAt(col: number, row: number): Ob | null {
+    if (col < 0 || col >= OB_COLS || row < 0 || row >= OB_ROWS) return null
+    return this.obGrid[row * OB_COLS + col]
+  }
+  obCenterX(o: Ob) { return OBX + o.col * OB_CELL + OB_CELL / 2 }
+  obCenterY(o: Ob) { return OBY + o.row * OB_CELL + OB_CELL / 2 }
+  /** 该地形是否阻挡此单位（会飞的无视深坑） */
+  blocks(o: Ob, canFly: boolean) {
+    if (o.kind === 'spike') return false
+    if (o.kind === 'pit') return !canFly
+    return true
+  }
+
+  /** 把圆形单位推出阻挡地形 */
+  resolveObstacles(p: { x: number; y: number }, rad: number, canFly: boolean) {
+    const c0 = Math.floor((p.x - rad - OBX) / OB_CELL)
+    const c1 = Math.floor((p.x + rad - OBX) / OB_CELL)
+    const r0 = Math.floor((p.y - rad - OBY) / OB_CELL)
+    const r1 = Math.floor((p.y + rad - OBY) / OB_CELL)
+    for (let row = r0; row <= r1; row++) {
+      for (let col = c0; col <= c1; col++) {
+        const o = this.obAt(col, row)
+        if (!o || !this.blocks(o, canFly)) continue
+        const bx = OBX + col * OB_CELL, by = OBY + row * OB_CELL
+        // 圆心到格子 AABB 的最近点
+        const nx = clamp(p.x, bx, bx + OB_CELL)
+        const ny = clamp(p.y, by, by + OB_CELL)
+        const dx = p.x - nx, dy = p.y - ny
+        const d2v = dx * dx + dy * dy
+        if (d2v >= rad * rad) continue
+        if (d2v > 0.0001) {
+          const d = Math.sqrt(d2v)
+          const push = rad - d
+          p.x += (dx / d) * push
+          p.y += (dy / d) * push
+        } else {
+          // 圆心陷在格子里：沿穿透最浅的轴弹出
+          const left = p.x - bx, right = bx + OB_CELL - p.x
+          const top = p.y - by, bottom = by + OB_CELL - p.y
+          const m = Math.min(left, right, top, bottom)
+          if (m === left) p.x = bx - rad
+          else if (m === right) p.x = bx + OB_CELL + rad
+          else if (m === top) p.y = by - rad
+          else p.y = by + OB_CELL + rad
+        }
+      }
+    }
+  }
+
+  /** 该点是否落在阻挡类地形上 */
+  blockedAt(x: number, y: number): boolean {
+    const o = this.obAt(Math.floor((x - OBX) / OB_CELL), Math.floor((y - OBY) / OB_CELL))
+    return !!o && this.blocks(o, false)
+  }
+
+  /** 弹体是否撞上石块；撞上则扣血并返回 true（深坑与尖刺不挡） */
+  hitObstacle(x: number, y: number, dmg: number): boolean {
+    const col = Math.floor((x - OBX) / OB_CELL)
+    const row = Math.floor((y - OBY) / OB_CELL)
+    const o = this.obAt(col, row)
+    if (!o || o.kind !== 'rock') return false
+    o.hp -= dmg
+    o.flash = 0.08
+    this.parts.push({ x, y, vx: rand(-30, 30), vy: rand(-30, 30), life: 0.25, maxLife: 0.25, color: '#8a8aa0', size: 1 })
+    if (o.hp <= 0) this.breakRock(o)
+    return true
+  }
+
+  breakRock(o: Ob) {
+    const x = this.obCenterX(o), y = this.obCenterY(o)
+    this.burst(x, y, '#8a8aa0', 12)
+    sfx.hit()
+    const list = this.roomObs.get(this.curKey)
+    if (list) {
+      const i = list.indexOf(o)
+      if (i >= 0) list.splice(i, 1)
+    }
+    this.obGrid[o.row * OB_COLS + o.col] = null
+    if (chance(0.3)) this.gems.push({ x, y, val: 2, vx: 0, vy: 0 })
+  }
+
+  /** 踩到尖刺掉血 */
+  checkSpikes(dt: number) {
+    this.spikeCd = Math.max(0, this.spikeCd - dt)
+    if (this.spikeCd > 0 || this.dashT > 0) return // 冲刺可以掠过尖刺
+    const col = Math.floor((this.px - OBX) / OB_CELL)
+    const row = Math.floor((this.py - OBY) / OB_CELL)
+    const o = this.obAt(col, row)
+    if (o && o.kind === 'spike') {
+      const dmg = 8 * this.armorMul
+      this.hp -= dmg
+      this.spikeCd = 1
+      this.hurtFlash = 1
+      this.shake = 0.3
+      sfx.hurt()
+      this.float(this.px, this.py - 12, `-${Math.round(dmg)}`, '#ff4f6b', 9)
+    }
   }
 
   /** 首次进入房间时生成内容 */
@@ -289,9 +436,15 @@ export class Game {
     const kinds: EnemyKind[] = this.depth >= 3 ? ['slime', 'bat', 'skel'] : this.depth >= 2 ? ['slime', 'bat'] : ['slime', 'bat']
     for (let i = 0; i < n; i++) {
       const a = (Math.PI * 2 * i) / n + rand(-0.3, 0.3)
-      const rad = rand(60, Math.min(ROOM_W, ROOM_H) * 0.4)
-      const x = clamp(ROOM_W / 2 + Math.cos(a) * rad, 30, ROOM_W - 30)
-      const y = clamp(ROOM_H / 2 + Math.sin(a) * rad, 30, ROOM_H - 30)
+      let x = 0, y = 0
+      // 重试几次避开地形，实在找不到就退回房间中心（那里恒为空）
+      for (let k = 0; k < 12; k++) {
+        const rad = rand(60, Math.min(ROOM_W, ROOM_H) * 0.4)
+        x = clamp(ROOM_W / 2 + Math.cos(a) * rad, 30, ROOM_W - 30)
+        y = clamp(ROOM_H / 2 + Math.sin(a) * rad, 30, ROOM_H - 30)
+        if (!this.blockedAt(x, y)) break
+        if (k === 11) { x = ROOM_W / 2; y = ROOM_H / 2 }
+      }
       this.spawnEnemyAt(pick(kinds), x, y)
     }
     // 精英作为「房间挑战」偶发出现
@@ -361,6 +514,8 @@ export class Game {
   nextFloor() {
     this.depth++
     this.floor = genFloor(this.depth)
+    // 房间 key 只有 gx,gy，跨层会重复 —— 不清空的话新层会继承上一层的地形（含已打碎的石头）
+    this.roomObs.clear()
     this.enterRoom(this.floor.startKey, null)
     this.float(this.px, this.py - 30, `第 ${this.depth} 层`, '#ffd75e', 12)
     sfx.win()
@@ -520,16 +675,24 @@ export class Game {
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 4)
 
     this.roomFlash = Math.max(0, this.roomFlash - dt)
+    for (const o of this.obs) if (o.flash > 0) o.flash = Math.max(0, o.flash - dt)
     this.movePlayer(dt)
     const pp = { x: this.px, y: this.py }
     this.clampToRoom(pp, 6, true)
+    this.resolveObstacles(pp, 6, false)
     this.px = pp.x; this.py = pp.y
+    this.checkSpikes(dt)
 
     // 回复
     if (this.regen > 0) this.hp = Math.min(this.maxHp, this.hp + this.regen * dt)
 
     this.updateEnemies(dt)
-    for (const e of this.enemies) if (!e.dead) this.clampToRoom(e, e.r, false)
+    for (const e of this.enemies) {
+      if (e.dead) continue
+      this.clampToRoom(e, e.r, false)
+      // 小恶魔会飞，可以越过深坑；Boss 体型太大不受地形限制
+      if (e.kind !== 'boss') this.resolveObstacles(e, e.r, e.kind === 'bat')
+    }
     this.rebuildGrid()
     this.separateEnemies()
     this.updateWeapons(dt)
@@ -957,6 +1120,7 @@ export class Game {
       }
       h.x += h.vx * dt
       h.y += h.vy * dt
+      if (this.hitObstacle(h.x, h.y, h.dmg)) { h.life = 0; continue }
       this.forEachNear(h.x, h.y, 10, e => {
         if (h.pierce <= 0 || e.dead) return
         if (dist2(h.x, h.y, e.x, e.y) < (4 + e.r) ** 2) {
@@ -987,6 +1151,8 @@ export class Game {
       p.y += p.vy * dt
       p.life -= dt
       if (p.life <= 0) continue
+      // 撞石头：弹体消耗掉，石头掉血
+      if (this.hitObstacle(p.x, p.y, p.dmg)) { p.life = 0; continue }
       this.forEachNear(p.x, p.y, 10, e => {
         if (p.pierce <= 0 || e.dead) return
         if (dist2(p.x, p.y, e.x, e.y) < (4 + e.r) ** 2) {
@@ -1525,6 +1691,51 @@ export class Game {
           const a = rand(Math.PI * 2)
           this.parts.push({ x: this.px + Math.cos(a) * r * 0.9, y: this.py + Math.sin(a) * r * 0.9, vx: rand(-6, 6), vy: -24, life: 0.5, maxLife: 0.5, color: '#ff6b35', size: 1 })
         }
+      }
+    }
+
+    // ---- 地形（在实体下层）----
+    for (const o of this.obs) {
+      const ox = OBX + o.col * OB_CELL, oy = OBY + o.row * OB_CELL
+      const X = W(ox), Y = H(oy)
+      if (o.kind === 'pit') {
+        // 深坑：黑洞 + 内壁高光
+        g.fillStyle = '#05050c'
+        g.fillRect(X, Y, OB_CELL, OB_CELL)
+        g.fillStyle = '#1a1626'
+        g.fillRect(X, Y, OB_CELL, 4)
+        g.strokeStyle = '#2a2338'
+        g.strokeRect(X + 0.5, Y + 0.5, OB_CELL - 1, OB_CELL - 1)
+      } else if (o.kind === 'spike') {
+        // 尖刺：一排三角
+        g.fillStyle = '#2a2436'
+        g.fillRect(X, Y + OB_CELL - 8, OB_CELL, 8)
+        g.fillStyle = '#b8b8cc'
+        for (let i = 0; i < 4; i++) {
+          const sx = X + 4 + i * 8
+          g.beginPath()
+          g.moveTo(sx, Y + OB_CELL - 6)
+          g.lineTo(sx + 3, Y + OB_CELL - 18)
+          g.lineTo(sx + 6, Y + OB_CELL - 6)
+          g.closePath(); g.fill()
+        }
+      } else {
+        // 石块：受击变亮，血量越低裂纹越多
+        const inset = 2
+        g.fillStyle = o.flash > 0 ? '#b9b9cc' : '#5b5b74'
+        g.fillRect(X + inset, Y + inset, OB_CELL - inset * 2, OB_CELL - inset * 2)
+        g.fillStyle = o.flash > 0 ? '#d8d8e8' : '#6e6e8a'
+        g.fillRect(X + inset, Y + inset, OB_CELL - inset * 2, 5)
+        g.fillStyle = '#3c3c50'
+        g.fillRect(X + inset, Y + OB_CELL - inset - 4, OB_CELL - inset * 2, 4)
+        const dmgFrac = 1 - o.hp / o.maxHp
+        if (dmgFrac > 0.25) {
+          g.fillStyle = '#3c3c50'
+          g.fillRect(X + 10, Y + 8, 2, 10)
+          if (dmgFrac > 0.6) { g.fillRect(X + 18, Y + 14, 2, 9); g.fillRect(X + 8, Y + 20, 8, 2) }
+        }
+        g.strokeStyle = '#2a2a3c'
+        g.strokeRect(X + inset + 0.5, Y + inset + 0.5, OB_CELL - inset * 2 - 1, OB_CELL - inset * 2 - 1)
       }
     }
 
