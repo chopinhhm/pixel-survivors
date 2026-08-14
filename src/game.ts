@@ -7,11 +7,14 @@ import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, f
 import { Profile, loadProfile, saveProfile, INV_CAP } from './save'
 import { Floor, RoomDef, Dir, DIRS, DIR_LIST, genFloor, rkey, hasDoor } from './rooms'
 import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
-import { RunStats, RunItem, baseStats, computeStats, rollRunItem, ITEM_BY_ID } from './runitems'
+import { RunStats, RunItem, ActiveItem, baseStats, computeStats, rollRunItem, rollActive, ITEM_BY_ID } from './runitems'
 import { makeEmblem } from './sprites'
 
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
-const ENEMY_DRAW_SCALE: Record<string, number> = { slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6 }
+const ENEMY_DRAW_SCALE: Record<string, number> = {
+  slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6,
+  bomber: 1.15, turret: 1.1, summoner: 1.1,
+}
 
 export const VW = 640
 export const VH = 360
@@ -41,7 +44,18 @@ const PORTAL = { x: 0, y: -118 }
 const STASH = { x: -96, y: 46 }
 const FORGE = { x: 96, y: 46 }
 const FORGE_COST = 60
-type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss'
+type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner'
+
+// 新兵种复用现有贴图 + 色相偏移，做出辨识度而不需要新素材
+const ENEMY_ANIM: Record<EnemyKind, string> = {
+  slime: 'slime', bat: 'bat', skel: 'skel', elite: 'elite', boss: 'boss',
+  bomber: 'bat', turret: 'skel', summoner: 'skel',
+}
+const ENEMY_TINT: Partial<Record<EnemyKind, string>> = {
+  bomber: 'hue-rotate(310deg) saturate(2.4) brightness(1.1)',
+  turret: 'hue-rotate(110deg) saturate(2) brightness(0.95)',
+  summoner: 'hue-rotate(240deg) saturate(2.2)',
+}
 
 interface Enemy {
   id: number; kind: EnemyKind
@@ -76,6 +90,8 @@ interface FloatText { x: number; y: number; txt: string; life: number; color: st
 interface Nova { x: number; y: number; r: number; maxR: number; dmg: number; hit: Set<number> }
 interface Bolt { pts: number[]; life: number }
 interface Chest { x: number; y: number; opened: number }
+/** 道具台。price>0 时需要付费：gold 扣金币，hp 扣生命 */
+interface Pedestal { x: number; y: number; item: RunItem | null; act: ActiveItem | null; price: number; kind: 'free' | 'gold' | 'hp'; taken: boolean }
 
 const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: number; r: number; xp: number; scale: number }> = {
   slime: { hp: 12, spd: 26, dmg: 8, r: 5, xp: 1, scale: 1 },
@@ -85,6 +101,9 @@ const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: number; r: n
   // 房间制下只有一发基础弹，2600 血的 Boss 裸装要打 144 秒
   elite: { hp: 150, spd: 30, dmg: 20, r: 10, xp: 20, scale: 1.8 },
   boss: { hp: 850, spd: 24, dmg: 30, r: 14, xp: 60, scale: 2 },
+  bomber: { hp: 18, spd: 68, dmg: 26, r: 6, xp: 3, scale: 1.15 },
+  turret: { hp: 55, spd: 0, dmg: 12, r: 7, xp: 4, scale: 1.1 },
+  summoner: { hp: 48, spd: 26, dmg: 12, r: 6, xp: 5, scale: 1.1 },
 }
 
 export class Game {
@@ -155,13 +174,23 @@ export class Game {
   floor: Floor = genFloor(1)
   curKey = ''
   depth = 1
-  /** 本房间的道具台（宝箱房）*/
-  pedestal: { x: number; y: number; item: RunItem } | null = null
+  /** 本房间的道具台。宝箱房免费，商店收金币，恶魔房收生命 */
+  pedestals: Pedestal[] = []
+  /** 主动技能：清房充能，按 Q 释放 */
+  active: ActiveItem | null = null
+  activeCharge = 0
+  /** 影分身剩余时间与开火计时 */
+  cloneT = 0
+  cloneFire = 0
+  /** 全场冻结剩余时间 */
+  freezeAll = 0
   /** Boss 被击败后出现的通往下一层的地板洞 */
   trapdoor: { x: number; y: number } | null = null
   roomFlash = 0 // 进房过渡
   /** 每间房的地形，按房间 key 存，离开再回来保持一致（石头打碎了就是碎了） */
   roomObs = new Map<string, Ob[]>()
+  /** 每间房的道具台同理：不存的话离开再进来会刷新，商店可以无限重roll */
+  roomPeds = new Map<string, Pedestal[]>()
   /** 当前房间地形的格子索引，O(1) 查询碰撞 */
   obGrid: (Ob | null)[] = []
   spikeCd = 0 // 尖刺伤害间隔
@@ -205,6 +234,12 @@ export class Game {
     if (!c) { c = makeEmblem(item.color, '#ffffff'); this.iconCache.set(item.id, c) }
     return c
   }
+  actIcon(a: ActiveItem): HTMLCanvasElement {
+    const k = 'act_' + a.id
+    let c = this.iconCache.get(k)
+    if (!c) { c = makeEmblem(a.color, '#ffffff'); this.iconCache.set(k, c) }
+    return c
+  }
 
   /** 拾取道具后重算属性；生命上限变化要同步补血 */
   addRunItem(item: RunItem) {
@@ -239,13 +274,15 @@ export class Game {
     this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0; this.dashBuf = 0
     this.hitStop = 0; this.hurtFlash = 0
     this.depth = 1
-    this.pedestal = null; this.trapdoor = null; this.boss = null
+    this.pedestals = []; this.trapdoor = null; this.boss = null
+    this.active = null; this.activeCharge = 0; this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0
     this.enemies = []; this.shots = []; this.eprojs = []; this.gems = []; this.hearts = []
     this.chests = []; this.novas = []; this.bolts = []; this.parts = []; this.floats = []
     this.eid = 1
     this.win = false; this.newRecord = false
     // 生成第一层并进入起始房
     this.roomObs.clear()
+    this.roomPeds.clear()
     this.floor = genFloor(1)
     this.enterRoom(this.floor.startKey, null)
   }
@@ -268,7 +305,7 @@ export class Game {
     this.gems = []; this.hearts = []; this.chests = []
     this.grid.clear()
     this.boss = null
-    this.pedestal = null
+    this.pedestals = []
     this.trapdoor = null
 
     // 玩家落位：从对面那扇门旁边进来
@@ -290,7 +327,9 @@ export class Game {
     }
     // Boss 房清完之后回来，要保证地板洞还在
     if (r.type === 'boss' && r.cleared) this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
-    if (r.type === 'treasure' && !r.looted) this.makePedestal()
+    let peds = this.roomPeds.get(key)
+    if (!peds) { peds = this.makePedestals(r); this.roomPeds.set(key, peds) }
+    this.pedestals = peds
   }
 
   // ---------- 地形 ----------
@@ -424,8 +463,11 @@ export class Game {
 
   /** 首次进入房间时生成内容 */
   populateRoom(r: RoomDef) {
-    if (r.type === 'start') { r.cleared = true; return }
-    if (r.type === 'treasure') { r.cleared = true; return }
+    // 起始房与各类特殊房都是安全区，不刷怪
+    if (r.type === 'start' || r.type === 'treasure' || r.type === 'shop' || r.type === 'devil') {
+      r.cleared = true
+      return
+    }
 
     if (r.type === 'boss') {
       const e = this.spawnEnemyAt('boss', ROOM_W / 2, ROOM_H * 0.32)
@@ -437,7 +479,12 @@ export class Game {
 
     // 普通房：按层数堆量，随机兵种组合
     const n = clamp(2 + Math.floor(this.depth * 1.2) + Math.floor(rand(0, 3)), 2, 10)
-    const kinds: EnemyKind[] = this.depth >= 3 ? ['slime', 'bat', 'skel'] : this.depth >= 2 ? ['slime', 'bat'] : ['slime', 'bat']
+    // 兵种随层数解锁，让每层的战斗感觉不同
+    const kinds: EnemyKind[] =
+      this.depth >= 4 ? ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner']
+      : this.depth >= 3 ? ['slime', 'bat', 'skel', 'bomber', 'turret']
+      : this.depth >= 2 ? ['slime', 'bat', 'skel', 'bomber']
+      : ['slime', 'bat']
     for (let i = 0; i < n; i++) {
       const a = (Math.PI * 2 * i) / n + rand(-0.3, 0.3)
       let x = 0, y = 0
@@ -458,9 +505,33 @@ export class Game {
     }
   }
 
-  /** 宝箱房的道具台：抽一件局内道具 */
-  makePedestal() {
-    this.pedestal = { x: ROOM_W / 2, y: ROOM_H / 2, item: rollRunItem(this.stats.luck + this.depth * 2) }
+  /** 按房间类型摆放道具台（结果会被缓存，重进不刷新） */
+  makePedestals(r: RoomDef): Pedestal[] {
+    const luck = this.stats.luck + this.depth * 2
+    const cy = ROOM_H / 2
+    if (r.type === 'treasure') {
+      // 宝箱房：一件免费被动，或（未持有主动时）有概率给主动技能
+      if (!this.active && chance(0.45)) {
+        return [{ x: ROOM_W / 2, y: cy, item: null, act: rollActive(), price: 0, kind: 'free', taken: false }]
+      }
+      return [{ x: ROOM_W / 2, y: cy, item: rollRunItem(luck), act: null, price: 0, kind: 'free', taken: false }]
+    }
+    if (r.type === 'shop') {
+      // 商店：3 件明码标价，让局内金币有真实用途
+      return [0, 1, 2].map(i => {
+        const item = rollRunItem(luck)
+        const price = [28, 45, 70][item.tier] + this.depth * 6
+        return { x: ROOM_W / 2 + (i - 1) * 110, y: cy, item, act: null, price, kind: 'gold' as const, taken: false }
+      })
+    }
+    if (r.type === 'devil') {
+      // 恶魔房：用生命换强力道具，稀有度拉高
+      return [0, 1].map(i => {
+        const item = rollRunItem(luck + 45)
+        return { x: ROOM_W / 2 + (i === 0 ? -80 : 80), y: cy, item, act: null, price: 22 + this.depth * 3, kind: 'hp' as const, taken: false }
+      })
+    }
+    return []
   }
 
   /** 房间是否已清空（无存活敌人） */
@@ -471,6 +542,13 @@ export class Game {
     r.cleared = true
     sfx.levelup()
     this.float(this.px, this.py - 30, '房间清空！', '#57e6a0', 10)
+    // 主动技能靠清房充能
+    if (this.active && this.activeCharge < this.active.charge) {
+      this.activeCharge++
+      if (this.activeCharge >= this.active.charge) {
+        this.float(this.px, this.py - 42, `${this.active.name} 已就绪 (Q)`, this.active.color, 10)
+      }
+    }
     if (r.type === 'boss') {
       this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
       this.float(ROOM_W / 2, ROOM_H / 2 - 40, '地板裂开了……', '#ffd75e', 10)
@@ -520,6 +598,7 @@ export class Game {
     this.floor = genFloor(this.depth)
     // 房间 key 只有 gx,gy，跨层会重复 —— 不清空的话新层会继承上一层的地形（含已打碎的石头）
     this.roomObs.clear()
+    this.roomPeds.clear()
     this.enterRoom(this.floor.startKey, null)
     this.float(this.px, this.py - 30, `第 ${this.depth} 层`, '#ffd75e', 12)
     sfx.win()
@@ -679,7 +758,28 @@ export class Game {
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 4)
 
     this.roomFlash = Math.max(0, this.roomFlash - dt)
+    this.freezeAll = Math.max(0, this.freezeAll - dt)
     for (const o of this.obs) if (o.flash > 0) o.flash = Math.max(0, o.flash - dt)
+
+    // 主动技能
+    if (Input.pressed('q')) {
+      if (this.activeReady) this.useActive()
+      else if (this.active) this.float(this.px, this.py - 24, `充能中 ${this.activeCharge}/${this.active.charge}`, '#9aa4c8', 8)
+    }
+    // 影分身：环绕玩家的三个分身持续开火
+    if (this.cloneT > 0) {
+      this.cloneT -= dt
+      this.cloneFire -= dt
+      if (this.cloneFire <= 0) {
+        this.cloneFire = 0.32
+        const st = this.stats
+        for (let i = 0; i < 3; i++) {
+          const a = this.frameT * 1.5 + (Math.PI * 2 * i) / 3
+          const cx = this.px + Math.cos(a) * 26, cy = this.py + Math.sin(a) * 26
+          this.spawnShot(cx, cy, this.aimAngle, 9 * st.dmg * 0.6, st)
+        }
+      }
+    }
     this.movePlayer(dt)
     const pp = { x: this.px, y: this.py }
     this.clampToRoom(pp, 6, true)
@@ -716,20 +816,114 @@ export class Game {
     if (this.hp <= 0) this.endRun(false)
   }
 
-  /** 走到道具台上就拿走（以撒式：直接生效，无菜单） */
+  /** 走到道具台上就拿走（以撒式：直接生效，无菜单）；收费台需要付得起 */
   updatePedestal() {
-    const p = this.pedestal
-    if (!p) return
-    if (dist2(p.x, p.y, this.px, this.py) < 13 * 13) {
-      this.addRunItem(p.item)
-      this.room.looted = true
-      this.pedestal = null
-      this.burst(p.x, p.y, p.item.color, 22)
-      this.float(p.x, p.y - 22, `获得 ${p.item.name}！`, p.item.color, 11)
-      this.float(p.x, p.y - 10, p.item.desc, '#ffffff', 8)
+    for (const p of this.pedestals) {
+      if (p.taken) continue
+      if (dist2(p.x, p.y, this.px, this.py) >= 13 * 13) continue
+
+      // 付费判定：付不起就提示，不消耗
+      if (p.kind === 'gold') {
+        if (this.runGold < p.price) {
+          if (this.frameT % 0.5 < 0.02) this.float(p.x, p.y - 30, `需要 ${p.price} 金币`, '#ff6b6b', 8)
+          continue
+        }
+        this.runGold -= p.price
+      } else if (p.kind === 'hp') {
+        // 生命不足时禁止购买，避免直接买死自己
+        if (this.hp <= p.price + 1) {
+          if (this.frameT % 0.5 < 0.02) this.float(p.x, p.y - 30, '生命不足', '#ff6b6b', 8)
+          continue
+        }
+        this.hp -= p.price
+        this.hurtFlash = 1
+        sfx.hurt()
+      }
+
+      p.taken = true
+      const col = p.item ? p.item.color : p.act!.color
+      const name = p.item ? p.item.name : p.act!.name
+      const desc = p.item ? p.item.desc : p.act!.desc
+      if (p.item) this.addRunItem(p.item)
+      else { this.active = p.act; this.activeCharge = 0 }
+
+      this.burst(p.x, p.y, col, 22)
+      this.float(p.x, p.y - 22, `获得 ${name}！`, col, 11)
+      this.float(p.x, p.y - 10, desc, '#ffffff', 8)
       this.hitStop = 0.12
       this.shake = 0.4
       sfx.levelup()
+      // 全部拿完才标记，商店可以分次买
+      if (this.pedestals.every(q => q.taken)) this.room.looted = true
+    }
+  }
+
+  // ---------- 主动技能 ----------
+  get activeReady() { return !!this.active && this.activeCharge >= this.active.charge }
+
+  useActive() {
+    const a = this.active
+    if (!a || !this.activeReady) return
+    this.activeCharge = 0
+    this.shake = 0.6
+    sfx.nova()
+    switch (a.id) {
+      case 'timestop':
+        this.freezeAll = 3
+        for (const e of this.enemies) if (!e.dead) e.slow = 3
+        this.float(this.px, this.py - 30, '时间静止！', '#8fd8ff', 12)
+        break
+      case 'nuke': {
+        this.hp = Math.max(1, this.hp - 15) // 保底留 1 血，不能把自己用死
+        this.hurtFlash = 1
+        const dmg = 160 + this.depth * 40
+        for (const e of this.enemies.slice()) if (!e.dead) this.damage(e, dmg)
+        this.burst(this.px, this.py, '#b13e53', 40)
+        this.hitStop = 0.15
+        break
+      }
+      case 'barrage': {
+        const st = this.stats
+        for (let i = 0; i < 28; i++) {
+          this.spawnShot(this.px, this.py, (Math.PI * 2 * i) / 28, 9 * st.dmg, st)
+        }
+        break
+      }
+      case 'shield':
+        this.invuln = Math.max(this.invuln, 5)
+        this.float(this.px, this.py - 30, '无敌 5 秒！', '#57e6a0', 12)
+        break
+      case 'heal':
+        this.hp = Math.min(this.maxHp, this.hp + 60)
+        this.float(this.px, this.py - 30, '+60', '#7de37d', 12)
+        sfx.heal()
+        break
+      case 'gravity': {
+        const tx = clamp(this.aimX, 20, ROOM_W - 20), ty = clamp(this.aimY, 20, ROOM_H - 20)
+        for (const e of this.enemies) {
+          if (e.dead) continue
+          e.x += (tx - e.x) * 0.75
+          e.y += (ty - e.y) * 0.75
+          this.damage(e, 40 + this.depth * 10)
+        }
+        this.burst(tx, ty, '#b98cff', 30)
+        break
+      }
+      case 'midas': {
+        let gained = 0
+        for (const e of this.enemies.slice()) {
+          if (e.dead) continue
+          gained += Math.max(1, Math.round(e.hp / 8))
+          this.damage(e, e.hp + 1)
+        }
+        this.gainCoin(gained)
+        this.float(this.px, this.py - 30, `+${gained} 金币`, '#ffd75e', 12)
+        break
+      }
+      case 'clone':
+        this.cloneT = 8
+        this.float(this.px, this.py - 30, '影分身！', '#57c7ff', 12)
+        break
     }
   }
 
@@ -814,6 +1008,12 @@ export class Game {
 
       let moveX = dx / d, moveY = dy / d, spd = e.spd
 
+      // 时停：完全跳过 AI，否则炮台/Boss 在"静止"时还会继续放技能
+      if (this.freezeAll > 0) {
+        if (chance(0.1)) this.parts.push({ x: e.x + rand(-6, 6), y: e.y - 6, vx: 0, vy: -8, life: 0.4, maxLife: 0.4, color: '#8fd8ff', size: 1 })
+        continue
+      }
+
       switch (e.kind) {
         case 'slime':
           // 波浪式缓慢逼近
@@ -871,6 +1071,53 @@ export class Game {
           }
           break
         }
+        case 'bomber': {
+          // 自爆怪：贴近后点燃引信，倒计时结束原地爆炸
+          spd = e.spd * 1.35
+          if (e.atkT > 0) {
+            e.atkT -= dt
+            spd = e.spd * 0.35 // 引信燃烧时减速，给玩家逃跑窗口
+            if (e.atkT <= 0) { this.bomberExplode(e); continue }
+          } else if (d < 42) {
+            e.atkT = 0.9
+            this.float(e.x, e.y - 16, '嘶——', '#ff6b6b', 8)
+          }
+          break
+        }
+        case 'turret': {
+          // 炮台：不动，周期性放射状齐射
+          spd = 0
+          e.specialT -= dt
+          if (e.specialT <= 0) {
+            e.specialT = 2.4
+            const n = 8
+            const off = rand(0, Math.PI)
+            for (let i = 0; i < n; i++) {
+              const a = off + (Math.PI * 2 * i) / n
+              this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 95, vy: Math.sin(a) * 95, dmg: e.dmg, life: 2.6, r: 3, color: '#7de37d' })
+            }
+            sfx.zap()
+          }
+          break
+        }
+        case 'summoner': {
+          // 召唤者：保持距离，周期性召唤小怪
+          if (d < 150) spd = -e.spd * 0.9
+          e.specialT -= dt
+          if (e.specialT <= 0) {
+            e.specialT = 4.5
+            // 场上小怪过多时不再召唤，避免滚雪球卡死房间
+            if (this.enemies.filter(o => !o.dead).length < 26) {
+              for (let i = 0; i < 2; i++) {
+                const a = rand(Math.PI * 2)
+                this.spawnEnemyAt('slime', clamp(e.x + Math.cos(a) * 22, 20, ROOM_W - 20), clamp(e.y + Math.sin(a) * 22, 20, ROOM_H - 20))
+              }
+              this.float(e.x, e.y - 18, '召唤！', '#b98cff', 8)
+              this.burst(e.x, e.y, '#b98cff', 10)
+            }
+          }
+          break
+        }
         case 'boss': {
           // 大恶魔：弹幕 / 扇形火球 / 召唤 + 蓄力冲锋
           e.chargeCd -= dt
@@ -918,10 +1165,10 @@ export class Game {
         }
       }
 
-      // 寒霜减速
+      // 寒霜减速（时停已在 AI 前提早 continue，这里只处理单体减速）
       if (e.slow > 0) {
         e.slow -= dt
-        spd *= 1 - this.stats.freeze
+        spd *= 1 - Math.max(0.35, this.stats.freeze)
       }
 
       e.x += moveX * spd * dt
@@ -1266,10 +1513,13 @@ export class Game {
     e.deathT = 0.18
     e.flash = 0.12
     this.kills++
-    const colors: Record<EnemyKind, string> = { slime: '#5ac54f', bat: '#7b5be0', skel: '#e6e6f0', elite: '#e05a4f', boss: '#b13e53' }
+    const colors: Record<EnemyKind, string> = {
+      slime: '#5ac54f', bat: '#7b5be0', skel: '#e6e6f0', elite: '#e05a4f', boss: '#b13e53',
+      bomber: '#ff7f3f', turret: '#7de37d', summoner: '#b98cff',
+    }
     this.burst(e.x, e.y, colors[e.kind], e.kind === 'boss' ? 45 : e.kind === 'elite' ? 22 : 9)
     // 金币与装备掉落
-    this.runGold += e.kind === 'boss' ? 120 : e.kind === 'elite' ? 30 : 1
+    this.runGold += e.kind === 'boss' ? 120 : e.kind === 'elite' ? 30 : e.kind === 'summoner' ? 5 : 1
     if (e.kind === 'boss') { this.dropLoot(e.x, e.y, 2, 35) }
     else if (e.kind === 'elite') { this.dropLoot(e.x, e.y, 1, 18) }
     else if (chance(0.012)) { this.dropLoot(e.x, e.y, 1, 0) }
@@ -1305,6 +1555,25 @@ export class Game {
         c.spawnScale = 0.6
       }
     }
+  }
+
+  /** 自爆怪引爆：范围伤害同时打到玩家和其他敌人 */
+  bomberExplode(e: Enemy) {
+    const r = 46
+    this.burst(e.x, e.y, '#ff7f3f', 26)
+    this.novas.push({ x: e.x, y: e.y, r: 6, maxR: r, dmg: e.dmg * 0.8, hit: new Set() })
+    this.shake = 0.5
+    sfx.boom()
+    // 直接判定玩家，不依赖 nova 的环形判定（离得太近会被环跳过）
+    if (this.invuln <= 0 && dist2(e.x, e.y, this.px, this.py) < r * r) {
+      this.hp -= e.dmg * this.armorMul
+      this.invuln = 0.8
+      this.hurtFlash = 1
+      this.hitStop = 0.07
+      sfx.hurt()
+      this.float(this.px, this.py - 12, `-${Math.round(e.dmg * this.armorMul)}`, '#ff4f6b', 9)
+    }
+    this.kill(e)
   }
 
   /** 掉落装备到本局战利品；背包满了也照收，结算时再按容量并入 */
@@ -1722,27 +1991,46 @@ export class Game {
       if (Math.floor(this.frameT * 2) % 2 === 0) g.fillText('下一层', W(td.x), H(td.y) - 16)
     }
 
-    // 道具台
-    const ped = this.pedestal
-    if (ped) {
-      const bob = Math.sin(this.frameT * 3) * 2
+    // 道具台（宝箱房 1 个 / 商店 3 个 / 恶魔房 2 个）
+    for (const ped of this.pedestals) {
+      if (ped.taken) continue
+      const bob = Math.sin(this.frameT * 3 + ped.x) * 2
+      const col = ped.item ? ped.item.color : ped.act!.color
+      const name = ped.item ? ped.item.name : ped.act!.name
+      const desc = ped.item ? ped.item.desc : ped.act!.desc
       // 台座
       g.fillStyle = '#3a3f66'
       g.fillRect(Math.round(W(ped.x) - 7), Math.round(H(ped.y) + 2), 14, 6)
       g.fillStyle = '#5c6285'
       g.fillRect(Math.round(W(ped.x) - 9), Math.round(H(ped.y) + 7), 18, 3)
-      // 悬浮的道具图标
-      this.glow(W(ped.x), H(ped.y) - 6 + bob, 18, ped.item.color, 0.6)
-      const icon = this.itemIcon(ped.item)
+      // 悬浮图标（主动技能多一圈光晕以示区别）
+      this.glow(W(ped.x), H(ped.y) - 6 + bob, ped.act ? 24 : 18, col, 0.6)
+      const icon = ped.item ? this.itemIcon(ped.item) : this.actIcon(ped.act!)
       const isc = 2
       g.drawImage(icon, Math.round(W(ped.x) - icon.width * isc / 2), Math.round(H(ped.y) - 10 + bob - icon.height * isc / 2), icon.width * isc, icon.height * isc)
       g.textAlign = 'center'
       g.font = 'bold 8px monospace'
-      g.fillStyle = ped.item.color
-      g.fillText(ped.item.name, W(ped.x), H(ped.y) - 24)
+      g.fillStyle = col
+      g.fillText(name, W(ped.x), H(ped.y) - 24)
       g.font = '7px monospace'
       g.fillStyle = '#9aa4c8'
-      g.fillText(ped.item.desc, W(ped.x), H(ped.y) + 22)
+      g.fillText(desc, W(ped.x), H(ped.y) + 22)
+      // 价格
+      if (ped.kind === 'gold') {
+        const afford = this.runGold >= ped.price
+        g.font = 'bold 9px monospace'
+        g.fillStyle = afford ? '#ffd75e' : '#ff6b6b'
+        g.fillText(`${ped.price} 金币`, W(ped.x), H(ped.y) + 34)
+      } else if (ped.kind === 'hp') {
+        g.font = 'bold 9px monospace'
+        g.fillStyle = '#ff4f6b'
+        g.fillText(`${ped.price} 生命`, W(ped.x), H(ped.y) + 34)
+      }
+      if (ped.act) {
+        g.font = '7px monospace'
+        g.fillStyle = '#57c7ff'
+        g.fillText('主动技能 · Q 释放', W(ped.x), H(ped.y) + 44)
+      }
     }
 
     // 宝箱
@@ -1779,12 +2067,15 @@ export class Game {
       const baseScale = ENEMY_DRAW_SCALE[e.kind] ?? 1
       const sizeMul = e.r / ENEMY_BASE[e.kind].r // 分裂怪按碰撞半径缩放，视觉与判定一致
       const drawScale = baseScale * sizeMul * e.spawnScale * (e.dead ? Math.max(0, e.deathT / 0.18) : 1)
-      const img = frame(e.kind, af, faceLeft) as CanvasImageSource
+      const img = frame(ENEMY_ANIM[e.kind], af, faceLeft) as CanvasImageSource
       const iw = (img as any).width * drawScale
       const ih = (img as any).height * drawScale
       this.shadow(W(e.x), H(e.y) + ih / 2 - 2, iw * 0.35)
       if (e.dead) g.filter = 'brightness(5) saturate(0)'
       else if (e.flash > 0) g.filter = 'brightness(4) saturate(0.5)'
+      // 自爆怪引信期间剧烈闪烁警示
+      else if (e.kind === 'bomber' && e.atkT > 0) g.filter = Math.floor(this.frameT * 16) % 2 === 0 ? 'brightness(3) saturate(2)' : (ENEMY_TINT.bomber || 'none')
+      else if (ENEMY_TINT[e.kind]) g.filter = ENEMY_TINT[e.kind]!
       g.drawImage(img, Math.round(W(e.x) - iw / 2), Math.round(H(e.y) - ih / 2), iw, ih)
       g.filter = 'none'
       if (!e.dead) {
@@ -2078,6 +2369,8 @@ export class Game {
       if (!r.visited) g.fillStyle = '#2a2e4a'
       else if (r.type === 'boss') g.fillStyle = '#b13e53'
       else if (r.type === 'treasure') g.fillStyle = '#ffd75e'
+      else if (r.type === 'shop') g.fillStyle = '#57e6a0'
+      else if (r.type === 'devil') g.fillStyle = '#b98cff'
       else g.fillStyle = r.cleared ? '#3f4870' : '#5c6285'
       g.fillRect(x, y, cell, cell)
       if (cur) {
@@ -2099,7 +2392,9 @@ export class Game {
     if (r) {
       g.font = '8px monospace'
       g.fillStyle = r.type === 'boss' ? '#ff4f6b' : r.type === 'treasure' ? '#ffd75e' : '#9aa4c8'
-      const tn = r.type === 'boss' ? 'BOSS 房' : r.type === 'treasure' ? '宝箱房' : r.type === 'start' ? '起始房' : '战斗房'
+      const tn = r.type === 'boss' ? 'BOSS 房' : r.type === 'treasure' ? '宝箱房'
+        : r.type === 'shop' ? '商店' : r.type === 'devil' ? '恶魔房'
+        : r.type === 'start' ? '起始房' : '战斗房'
       g.fillText(`${tn}${r.cleared ? '' : ' · 门已锁'}`, 4, 26)
     }
     // 计时
@@ -2142,7 +2437,7 @@ export class Game {
       g.textAlign = 'center'
       g.fillStyle = `rgba(255,255,255,${clamp(8 - this.t, 0, 1) * 0.8})`
       g.font = '9px monospace'
-      g.fillText('WASD 移动 · 鼠标瞄准 · Space/Shift 冲刺 · 清空房间开门', VW / 2, VH - 28)
+      g.fillText('WASD 移动 · 鼠标瞄准 · Space 冲刺 · Q 主动技能 · 清空房间开门', VW / 2, VH - 28)
     }
     // 已拾取道具栏（左下角，重复的道具叠加显示数量）
     const counts = new Map<string, number>()
@@ -2167,6 +2462,25 @@ export class Game {
       wx += 17
       if (wx > VW - 120) break // 道具太多时不挤爆 HUD
     }
+    // 主动技能槽（右下角，充满时发光提示按 Q）
+    if (this.active) {
+      const ax = VW - 46, ay = VH - 42
+      const ready = this.activeReady
+      if (ready) this.glow(ax + 14, ay + 14, 22, this.active.color, 0.5 + Math.sin(this.frameT * 5) * 0.2)
+      g.fillStyle = 'rgba(23,26,46,0.9)'
+      g.fillRect(ax, ay, 28, 28)
+      g.strokeStyle = ready ? this.active.color : '#3a3f66'
+      g.lineWidth = ready ? 2 : 1
+      g.strokeRect(ax + 0.5, ay + 0.5, 27, 27)
+      g.lineWidth = 1
+      const ic = this.actIcon(this.active)
+      g.drawImage(ic, ax + 5, ay + 5, 18, 18)
+      g.textAlign = 'center'
+      g.font = ready ? 'bold 7px monospace' : '7px monospace'
+      g.fillStyle = ready ? this.active.color : '#9aa4c8'
+      g.fillText(ready ? 'Q 就绪' : `${this.activeCharge}/${this.active.charge}`, ax + 14, ay + 36)
+    }
+
     // 冲刺冷却（HP 条上方小条）
     const dcw = 30
     g.fillStyle = '#171a2e'
@@ -2426,12 +2740,12 @@ export class Game {
     const foes: EnemyKind[] = ['slime', 'bat', 'skel', 'elite', 'boss']
     const ef = Math.floor(this.frameT * 6) % 4
     const scaleOf = (k: EnemyKind) => (k === 'boss' ? 1.2 : k === 'elite' ? 0.9 : 1.1)
-    const widths = foes.map(k => (frame(k, ef) as any).width * scaleOf(k))
+    const widths = foes.map(k => (frame(ENEMY_ANIM[k], ef) as any).width * scaleOf(k))
     const gapF = 10
     const totalW = widths.reduce((s, w) => s + w, 0) + gapF * (foes.length - 1)
     let fx = VW / 2 - totalW / 2
     foes.forEach((k, i) => {
-      const fi = frame(k, ef) as CanvasImageSource
+      const fi = frame(ENEMY_ANIM[k], ef) as CanvasImageSource
       const s = scaleOf(k)
       const w = widths[i], hh = (fi as any).height * s
       g.drawImage(fi, Math.round(fx), Math.round(VH * 0.62 - hh / 2), w, hh)

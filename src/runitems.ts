@@ -156,6 +156,35 @@ export const RUN_ITEMS: RunItem[] = [
 
 export const ITEM_BY_ID = new Map(RUN_ITEMS.map(i => [i.id, i]))
 
+// ---------------- 主动技能：清房充能，按 Q 释放 ----------------
+// 被动是"堆出来的强度"，主动是"用出来的时机" —— 补上操作深度那一层
+export interface ActiveItem {
+  id: string
+  name: string
+  desc: string
+  color: string
+  /** 需要清空几个房间才能充满 */
+  charge: number
+}
+
+export const ACTIVES: ActiveItem[] = [
+  // id 不与被动道具的 'freeze'(寒霜弹) 重名，避免两套表混淆
+  { id: 'timestop', name: '时停怀表', desc: '全场敌人冻结 3 秒', color: '#8fd8ff', charge: 3 },
+  { id: 'nuke', name: '血祭匕首', desc: '对全屏造成巨额伤害，代价是 15 点生命', color: '#b13e53', charge: 2 },
+  { id: 'barrage', name: '弹幕核心', desc: '向四面八方齐射 28 发', color: '#ffd75e', charge: 2 },
+  { id: 'shield', name: '守护符文', desc: '获得 5 秒无敌', color: '#57e6a0', charge: 4 },
+  { id: 'heal', name: '疗愈圣杯', desc: '回复 60 点生命', color: '#7de37d', charge: 3 },
+  { id: 'gravity', name: '引力井', desc: '把全场敌人拽向鼠标位置并造成伤害', color: '#b98cff', charge: 3 },
+  { id: 'midas', name: '点金手', desc: '将全场敌人的生命转化为金币', color: '#ffd75e', charge: 4 },
+  { id: 'clone', name: '影分身', desc: '召唤 3 个分身持续射击 8 秒', color: '#57c7ff', charge: 4 },
+]
+
+export const ACTIVE_BY_ID = new Map(ACTIVES.map(a => [a.id, a]))
+
+export function rollActive(): ActiveItem {
+  return ACTIVES[Math.floor(Math.random() * ACTIVES.length)]
+}
+
 /** 累积一组道具得到最终属性 */
 export function computeStats(ids: string[]): RunStats {
   const s = baseStats()
