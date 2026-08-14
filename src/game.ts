@@ -1228,9 +1228,10 @@ export class Game {
   updateWeapons(dt: number) {
     const st = this.stats
 
-    // ---- 主武器：朝鼠标开火 ----
-    this.fireT -= dt
-    if (this.fireT <= 0) {
+    // ---- 主武器：按住鼠标左键才开火，朝准星方向 ----
+    // 冷却只减到 0 不再往下走，避免松手期间攒出负值、一按下去糊一串子弹
+    this.fireT = Math.max(0, this.fireT - dt)
+    if (Input.mdown && this.fireT <= 0) {
       this.fireT = 0.5 / Math.max(0.15, st.rate)
       this.fireShot()
     }
@@ -2206,17 +2207,20 @@ export class Game {
       // 玩家身前的朝向小箭头
       const ind = 16
       this.glow(W(this.px + Math.cos(aimA) * ind), H(this.py + Math.sin(aimA) * ind), 5, '#57c7ff', 0.5)
-      // 准星
-      g.strokeStyle = 'rgba(255,255,255,0.85)'
+      // 准星：开火时收拢并染成弹体颜色，让"我正在射击"一眼可见
+      const firing = Input.mdown && this.state === 'play'
+      const gap = firing ? 2 : 3
+      const arm = firing ? 6 : 8
+      g.strokeStyle = firing ? this.shotColor : 'rgba(255,255,255,0.85)'
       g.lineWidth = 1
       g.beginPath()
-      g.arc(ax, ay, 5, 0, Math.PI * 2)
+      g.arc(ax, ay, firing ? 3.5 : 5, 0, Math.PI * 2)
       g.stroke()
       g.beginPath()
-      g.moveTo(ax - 8, ay); g.lineTo(ax - 3, ay)
-      g.moveTo(ax + 3, ay); g.lineTo(ax + 8, ay)
-      g.moveTo(ax, ay - 8); g.lineTo(ax, ay - 3)
-      g.moveTo(ax, ay + 3); g.lineTo(ax, ay + 8)
+      g.moveTo(ax - arm, ay); g.lineTo(ax - gap, ay)
+      g.moveTo(ax + gap, ay); g.lineTo(ax + arm, ay)
+      g.moveTo(ax, ay - arm); g.lineTo(ax, ay - gap)
+      g.moveTo(ax, ay + gap); g.lineTo(ax, ay + arm)
       g.stroke()
     }
 
@@ -2437,7 +2441,7 @@ export class Game {
       g.textAlign = 'center'
       g.fillStyle = `rgba(255,255,255,${clamp(8 - this.t, 0, 1) * 0.8})`
       g.font = '9px monospace'
-      g.fillText('WASD 移动 · 鼠标瞄准 · Space 冲刺 · Q 主动技能 · 清空房间开门', VW / 2, VH - 28)
+      g.fillText('WASD 移动 · 按住左键射击 · Space 冲刺 · Q 主动技能 · 清空房间开门', VW / 2, VH - 28)
     }
     // 已拾取道具栏（左下角，重复的道具叠加显示数量）
     const counts = new Map<string, number>()
@@ -2767,6 +2771,6 @@ export class Game {
     g.font = '8px monospace'
     g.fillStyle = '#5c6285'
     g.fillText('家园出发 · 传送门冒险 · 掉落装备带回家变强', VW / 2, VH * 0.90)
-    g.fillText('清空房间开门 · 逐层深入 · P 暂停 · M 静音', VW / 2, VH * 0.945)
+    g.fillText('按住左键射击 · 清空房间开门 · 逐层深入 · P 暂停 · M 静音', VW / 2, VH * 0.945)
   }
 }

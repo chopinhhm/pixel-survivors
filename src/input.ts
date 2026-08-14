@@ -27,5 +27,7 @@ export function bindInput(getTransform: () => { ox: number; oy: number; s: numbe
   addEventListener('pointermove', toGame)
   addEventListener('pointerdown', e => { toGame(e); Input.mdown = true; Input.mclick = true })
   addEventListener('pointerup', () => (Input.mdown = false))
-  addEventListener('blur', () => Input.keys.clear())
+  addEventListener('pointercancel', () => (Input.mdown = false))
+  // 失焦时必须一并清掉 mdown：否则按住左键切走再回来，会一直卡在开火状态
+  addEventListener('blur', () => { Input.keys.clear(); Input.mdown = false })
 }
