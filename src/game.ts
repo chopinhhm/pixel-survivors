@@ -46,6 +46,23 @@ const FORGE = { x: 96, y: 46 }
 const FORGE_COST = 60
 type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner'
 
+/** 通关层数：打赢第 6 层 Boss 即通关 */
+const FINAL_DEPTH = 6
+
+/** Boss 池：每层抽一个，让每次进 Boss 门都不知道会遇到谁 */
+type BossId = 'demon' | 'ogre' | 'skelking' | 'motherslime'
+interface BossDef {
+  id: BossId; name: string; anim: string; tint?: string
+  hp: number; spd: number; dmg: number; r: number; scale: number; draw: number
+}
+const BOSSES: BossDef[] = [
+  { id: 'demon', name: '大恶魔', anim: 'boss', hp: 850, spd: 24, dmg: 30, r: 14, scale: 2, draw: 1.6 },
+  { id: 'ogre', name: '狂暴食人魔', anim: 'elite', tint: 'hue-rotate(330deg) saturate(2.2) brightness(1.1)', hp: 780, spd: 34, dmg: 34, r: 13, scale: 2, draw: 2.2 },
+  { id: 'skelking', name: '骸骨之王', anim: 'skel', tint: 'hue-rotate(190deg) saturate(2) brightness(1.2)', hp: 700, spd: 26, dmg: 26, r: 12, scale: 2, draw: 2.4 },
+  { id: 'motherslime', name: '史莱姆之母', anim: 'slime', tint: 'hue-rotate(70deg) saturate(2.4)', hp: 900, spd: 20, dmg: 24, r: 15, scale: 2, draw: 3 },
+]
+const BOSS_BY_ID = new Map(BOSSES.map(b => [b.id, b]))
+
 // 新兵种复用现有贴图 + 色相偏移，做出辨识度而不需要新素材
 const ENEMY_ANIM: Record<EnemyKind, string> = {
   slime: 'slime', bat: 'bat', skel: 'skel', elite: 'elite', boss: 'boss',
@@ -67,6 +84,7 @@ interface Enemy {
   splits: number // 分裂史莱姆：死亡时分裂出的代数
   slow: number // 寒霜减速剩余时间
   burn: number; burnT: number // 炼狱光环的持续燃烧
+  bossId: BossId | null // Boss 专属招式分支
   atkT: number // 远程攻击冷却（骷髅）
   dashT: number; dashCd: number; dashDx: number; dashDy: number // 小恶魔突进方向
   chargeT: number; chargeCd: number; chargeAng: number // 精英/Boss 冲锋
@@ -327,8 +345,8 @@ export class Game {
       r.spawned = true
       this.populateRoom(r)
     }
-    // Boss 房清完之后回来，要保证地板洞还在
-    if (r.type === 'boss' && r.cleared) this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
+    // Boss 房清完之后回来，要保证地板洞还在（最终层没有下一层，不放洞）
+    if (r.type === 'boss' && r.cleared && this.depth < FINAL_DEPTH) this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
     let peds = this.roomPeds.get(key)
     if (!peds) { peds = this.makePedestals(r); this.roomPeds.set(key, peds) }
     this.pedestals = peds
@@ -576,10 +594,21 @@ export class Game {
     }
 
     if (r.type === 'boss') {
+      // 用房间 seed 选 Boss，保证同一层重进是同一只
+      const def = BOSSES[r.seed % BOSSES.length]
       const e = this.spawnEnemyAt('boss', ROOM_W / 2, ROOM_H * 0.32)
+      e.bossId = def.id
+      e.spd = def.spd
+      e.r = def.r
+      e.scale = def.scale
+      const isFinal = this.depth >= FINAL_DEPTH
+      const hpScale = (1 + (this.depth - 1) * 0.45) * (isFinal ? 1.6 : 1)
+      e.hp = e.maxHp = def.hp * hpScale
+      e.dmg = def.dmg * (1 + (this.depth - 1) * 0.25)
       this.boss = e
       sfx.boss()
       this.shake = 1
+      this.float(ROOM_W / 2, ROOM_H * 0.32 - 40, isFinal ? `最终 BOSS · ${def.name}` : def.name, '#ff4f6b', 12)
       return
     }
 
@@ -656,8 +685,16 @@ export class Game {
       }
     }
     if (r.type === 'boss') {
-      this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
-      this.float(ROOM_W / 2, ROOM_H / 2 - 40, '地板裂开了……', '#ffd75e', 10)
+      if (this.depth >= FINAL_DEPTH) {
+        // 最终层 Boss 倒下 = 通关
+        this.float(ROOM_W / 2, ROOM_H / 2 - 40, '深渊已被净化！', '#ffd75e', 14)
+        this.burst(ROOM_W / 2, ROOM_H / 2, '#ffd75e', 60)
+        this.hitStop = 0.3
+        this.endRun(true)
+      } else {
+        this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
+        this.float(ROOM_W / 2, ROOM_H / 2 - 40, '地板裂开了……', '#ffd75e', 10)
+      }
     }
   }
 
@@ -1063,6 +1100,12 @@ export class Game {
     best.kills = Math.max(best.kills, this.kills)
     if (win) best.wins++
     this.profile.runs++
+    // 通关奖励：大额金币 + 保底一件高稀有度装备，让"打穿"值得反复挑战
+    if (win) {
+      this.runGold += 400
+      this.runLoot.push(rollItem(this.profile.uidSeq++, 100, 3))
+      this.runLoot.push(rollItem(this.profile.uidSeq++, 60))
+    }
     // 战利品带回家：即使阵亡也保留，保证每次出门都有收获
     this.profile.gold += this.runGold
     this.lootLost = 0
@@ -1088,6 +1131,7 @@ export class Game {
       r: base.r, xp: base.xp, scale: base.scale, spawnScale: 0, deathT: 0, splits: 0, slow: 0,
       flash: 0, auraCd: 0, orbCd: 0,
       burn: 0, burnT: 0,
+      bossId: null,
       atkT: rand(1.5, 3),
       dashT: 0, dashCd: rand(1, 2.5), dashDx: 0, dashDy: 0,
       chargeT: 0, chargeCd: rand(2, 4), chargeAng: 0,
@@ -1235,46 +1279,26 @@ export class Game {
           break
         }
         case 'boss': {
-          // 大恶魔：弹幕 / 扇形火球 / 召唤 + 蓄力冲锋
+          // 所有 Boss 共用「蓄力冲锋」骨架，招式分支按 bossId 区分
           e.chargeCd -= dt
           if (e.chargeT > 0) {
             e.chargeT -= dt
             if (e.chargeT < 0.8) {
               moveX = Math.cos(e.chargeAng)
               moveY = Math.sin(e.chargeAng)
-              spd = 145
+              spd = e.bossId === 'ogre' ? 210 : 145 // 食人魔以冲锋为主，冲得更凶
             } else {
               spd = 0 // 预警原地
             }
-            if (e.chargeT <= 0) e.chargeCd = 5
-          } else if (e.chargeCd <= 0 && d < 180) {
+            if (e.chargeT <= 0) e.chargeCd = e.bossId === 'ogre' ? 2.6 : 5
+          } else if (e.chargeCd <= 0 && d < (e.bossId === 'ogre' ? 260 : 180)) {
             e.chargeT = 1.25
             e.chargeAng = Math.atan2(dy, dx)
           } else {
             e.specialT -= dt
             if (e.specialT <= 0) {
-              e.specialT = 3.2
-              const move = Math.floor(rand(0, 3))
-              if (move === 0) {
-                // 弹幕：12 向火球
-                for (let i = 0; i < 12; i++) {
-                  const a = (Math.PI * 2 * i) / 12
-                  this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 80, vy: Math.sin(a) * 80, dmg: 12, life: 3, r: 3, color: '#ff7f3f' })
-                }
-                sfx.zap()
-              } else if (move === 1) {
-                // 扇形火球
-                const base = Math.atan2(dy, dx)
-                for (let i = -2; i <= 2; i++) {
-                  const a = base + i * 0.28
-                  this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 120, vy: Math.sin(a) * 120, dmg: 16, life: 2.2, r: 4, color: '#ff4f6b' })
-                }
-                sfx.zap()
-              } else {
-                // 召唤小怪
-                for (let i = 0; i < 3; i++) this.spawnEnemyAt(pick(['slime', 'bat']), e.x + rand(-30, 30), e.y + rand(-30, 30))
-                this.float(e.x, e.y - 20, '召唤！', '#b13e53')
-              }
+              e.specialT = e.bossId === 'skelking' ? 2.4 : 3.2
+              this.bossAttack(e, dx, dy, d)
             }
           }
           break
@@ -1670,6 +1694,63 @@ export class Game {
         c.r = Math.max(3, e.r * 0.65)
         c.hp = c.maxHp = e.maxHp * 0.35
         c.spawnScale = 0.6
+      }
+    }
+  }
+
+  /** Boss 招式：每只一套，让每层的「期末考试」不重样 */
+  bossAttack(e: Enemy, dx: number, dy: number, _d: number) {
+    const base = Math.atan2(dy, dx)
+    const shoot = (a: number, sp: number, dmg: number, r: number, color: string, life = 2.6) => {
+      this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, dmg, life, r, color })
+    }
+    switch (e.bossId) {
+      case 'ogre': {
+        // 食人魔：以冲锋为主，间隙震地甩石块
+        for (let i = 0; i < 6; i++) shoot(base + rand(-0.9, 0.9), rand(70, 130), e.dmg * 0.45, 4, '#c98a4b', 2.2)
+        this.shake = 0.5
+        sfx.boom()
+        break
+      }
+      case 'skelking': {
+        // 骸骨之王：高频螺旋弹幕，纯考走位
+        const off = this.frameT * 2
+        for (let i = 0; i < 10; i++) shoot(off + (Math.PI * 2 * i) / 10, 95, e.dmg * 0.4, 3, '#e6e6f0', 3.2)
+        sfx.zap()
+        break
+      }
+      case 'motherslime': {
+        // 史莱姆之母：召唤分裂史莱姆 + 黏液喷射
+        if (this.enemies.filter(o => !o.dead).length < 22) {
+          for (let i = 0; i < 3; i++) {
+            const a = rand(Math.PI * 2)
+            const c = this.spawnEnemyAt('slime', clamp(e.x + Math.cos(a) * 26, 20, ROOM_W - 20), clamp(e.y + Math.sin(a) * 26, 20, ROOM_H - 20))
+            c.splits = 1
+            c.scale *= 1.4
+            c.r *= 1.3
+            c.hp = c.maxHp = c.maxHp * 1.8
+          }
+          this.float(e.x, e.y - 22, '分裂！', '#5ac54f', 10)
+        }
+        for (let i = -2; i <= 2; i++) shoot(base + i * 0.22, 105, e.dmg * 0.5, 5, '#5ac54f')
+        sfx.nova()
+        break
+      }
+      default: {
+        // 大恶魔：环形弹幕 / 扇形火球 / 召唤三选一
+        const move = Math.floor(rand(0, 3))
+        if (move === 0) {
+          for (let i = 0; i < 12; i++) shoot((Math.PI * 2 * i) / 12, 80, e.dmg * 0.4, 3, '#ff7f3f', 3)
+          sfx.zap()
+        } else if (move === 1) {
+          for (let i = -2; i <= 2; i++) shoot(base + i * 0.28, 120, e.dmg * 0.55, 4, '#ff4f6b', 2.2)
+          sfx.zap()
+        } else {
+          for (let i = 0; i < 3; i++) {
+            this.spawnEnemyAt(pick(['slime', 'bat']), clamp(e.x + rand(-30, 30), 20, ROOM_W - 20), clamp(e.y + rand(-30, 30), 20, ROOM_H - 20))
+          }
+          this.float(e.x, e.y - 20, '召唤！', '#b13e53')
+        }
       }
     }
   }
@@ -2181,10 +2262,12 @@ export class Game {
     for (const e of this.enemies) {
       const af = Math.floor(this.frameT * 8 + e.id) % 4
       const faceLeft = this.px < e.x
-      const baseScale = ENEMY_DRAW_SCALE[e.kind] ?? 1
-      const sizeMul = e.r / ENEMY_BASE[e.kind].r // 分裂怪按碰撞半径缩放，视觉与判定一致
+      // Boss 走 BOSSES 表（各自贴图与体型），普通怪走 ENEMY_ANIM
+      const bd = e.bossId ? BOSS_BY_ID.get(e.bossId) : undefined
+      const baseScale = bd ? bd.draw : (ENEMY_DRAW_SCALE[e.kind] ?? 1)
+      const sizeMul = bd ? 1 : e.r / ENEMY_BASE[e.kind].r // 分裂怪按碰撞半径缩放，视觉与判定一致
       const drawScale = baseScale * sizeMul * e.spawnScale * (e.dead ? Math.max(0, e.deathT / 0.18) : 1)
-      const img = frame(ENEMY_ANIM[e.kind], af, faceLeft) as CanvasImageSource
+      const img = frame(bd ? bd.anim : ENEMY_ANIM[e.kind], af, faceLeft) as CanvasImageSource
       const iw = (img as any).width * drawScale
       const ih = (img as any).height * drawScale
       this.shadow(W(e.x), H(e.y) + ih / 2 - 2, iw * 0.35)
@@ -2192,6 +2275,7 @@ export class Game {
       else if (e.flash > 0) g.filter = 'brightness(4) saturate(0.5)'
       // 自爆怪引信期间剧烈闪烁警示
       else if (e.kind === 'bomber' && e.atkT > 0) g.filter = Math.floor(this.frameT * 16) % 2 === 0 ? 'brightness(3) saturate(2)' : (ENEMY_TINT.bomber || 'none')
+      else if (e.bossId && BOSS_BY_ID.get(e.bossId)?.tint) g.filter = BOSS_BY_ID.get(e.bossId)!.tint!
       else if (ENEMY_TINT[e.kind]) g.filter = ENEMY_TINT[e.kind]!
       g.drawImage(img, Math.round(W(e.x) - iw / 2), Math.round(H(e.y) - ih / 2), iw, ih)
       g.filter = 'none'
@@ -2507,7 +2591,8 @@ export class Game {
     g.font = 'bold 10px monospace'
     g.textAlign = 'left'
     g.fillStyle = '#ffffff'
-    g.fillText(`第 ${this.depth} 层`, 4, 14)
+    g.fillStyle = this.depth >= FINAL_DEPTH ? '#ff4f6b' : '#ffffff'
+    g.fillText(`第 ${this.depth} / ${FINAL_DEPTH} 层`, 4, 14)
     const r = this.room
     if (r) {
       g.font = '8px monospace'
@@ -2550,7 +2635,8 @@ export class Game {
       g.fillRect(VW / 2 - bw / 2, VH - 14, bw * clamp(this.boss.hp / this.boss.maxHp, 0, 1), 8)
       g.textAlign = 'center'
       g.fillStyle = '#ffffff'
-      g.fillText('BOSS', VW / 2, VH - 17)
+      const bn = this.boss.bossId ? BOSS_BY_ID.get(this.boss.bossId)?.name : null
+      g.fillText(this.depth >= FINAL_DEPTH ? `最终 BOSS · ${bn ?? ''}` : (bn ?? 'BOSS'), VW / 2, VH - 17)
     }
     // 开场提示
     if (this.t < 8) {
@@ -2661,10 +2747,10 @@ export class Game {
     g.font = 'bold 22px monospace'
     if (this.win) {
       g.fillStyle = '#ffd75e'
-      g.fillText('胜 利 ！', cx, y)
+      g.fillText('通 关 ！', cx, y)
       g.font = '9px monospace'
       g.fillStyle = '#9aa4c8'
-      g.fillText('你在怪物狂潮中活了下来', cx, y + 22)
+      g.fillText(`你打穿了 ${FINAL_DEPTH} 层深渊`, cx, y + 22)
     } else {
       g.fillStyle = '#ff4f6b'
       g.fillText('你倒下了……', cx, y)
@@ -2878,7 +2964,8 @@ export class Game {
       g.fillStyle = '#9aa4c8'
       g.font = '8px monospace'
       const b = this.profile.best
-      g.fillText(`最深纪录  第 ${b.depth || 1} 层 · 存活 ${fmtTime(b.time)} · 击杀 ${b.kills}`, VW / 2, VH * 0.71)
+      const wins = b.wins > 0 ? ` · 通关 ${b.wins} 次` : ''
+      g.fillText(`最深纪录  第 ${b.depth || 1} 层 · 存活 ${fmtTime(b.time)} · 击杀 ${b.kills}${wins}`, VW / 2, VH * 0.71)
     }
     // 开始提示（闪烁）
     if (Math.floor(this.frameT * 2) % 2 === 0) {
