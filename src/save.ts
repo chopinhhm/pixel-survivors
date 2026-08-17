@@ -71,7 +71,8 @@ export function saveProfile(p: Profile) {
 const RUN_KEY = 'pxsurv-run'
 // v2: 增加 charId（缺失会按错误基础血量恢复）
 // v3: 增加 curseIds / endless（缺失会让诅咒凭空消失、无尽模式退回通关判定）
-const RUN_VER = 3
+// v4: 增加 devilDeals / winRecorded（缺失会导致天使房误判、通关奖励可被读档重复领取）
+const RUN_VER = 4
 
 export interface SavedRoom {
   gx: number; gy: number; type: string
@@ -98,6 +99,8 @@ export interface RunSave {
   itemIds: string[]
   curseIds: string[]
   endless: boolean
+  devilDeals: number
+  winRecorded: boolean
   activeId: string | null
   activeCharge: number
   gold: number

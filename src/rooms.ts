@@ -1,7 +1,7 @@
 // 楼层生成：以撒式的房间网格
 // 相邻即连通（同以撒），房间内部坐标独立，相机固定不跟随
 
-export type RoomType = 'start' | 'normal' | 'treasure' | 'boss' | 'shop' | 'devil'
+export type RoomType = 'start' | 'normal' | 'treasure' | 'boss' | 'shop' | 'devil' | 'challenge' | 'angel'
 export type Dir = 'n' | 's' | 'w' | 'e'
 
 export interface RoomDef {
@@ -130,7 +130,12 @@ export function genFloor(depth: number): Floor {
   // 恶魔房：越深越容易出现，用生命换强力道具
   if (rooms.size >= 10 && Math.random() < 0.35 + depth * 0.06) {
     const devil = deadEnds.find(r => !taken.has(r)) || byFar.find(r => !taken.has(r) && r.type === 'normal')
-    if (devil) devil.type = 'devil'
+    if (devil) { devil.type = 'devil'; taken.add(devil) }
+  }
+  // 挑战房：可选的高风险波次，奖励丰厚
+  if (rooms.size >= 9 && Math.random() < 0.45) {
+    const ch = deadEnds.find(r => !taken.has(r)) || byFar.find(r => !taken.has(r) && r.type === 'normal')
+    if (ch) { ch.type = 'challenge'; taken.add(ch) }
   }
 
   return { rooms, startKey, bossKey: boss ? rkey(boss.gx, boss.gy) : startKey, depth }

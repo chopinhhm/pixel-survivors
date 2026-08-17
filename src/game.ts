@@ -192,6 +192,11 @@ export class Game {
   endless = false
   /** 通关奖励是否已发放，防止 recordWin 与 endRun 重复记账 */
   winRecorded = false
+  /** 本局做过几次恶魔交易。一次没做才会出现天使房 */
+  devilDeals = 0
+  /** 挑战房波次进度 */
+  challengeActive = false
+  challengeWave = 0
   fireT = 0
   orbAng = 0
   boltT = 0
@@ -338,6 +343,9 @@ export class Game {
     this.curses = baseCurses()
     this.endless = false
     this.winRecorded = false
+    this.devilDeals = 0
+    this.challengeActive = false
+    this.challengeWave = 0
     this.fireT = 0; this.orbAng = 0; this.boltT = 0
     this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
@@ -355,6 +363,7 @@ export class Game {
     this.roomObs.clear()
     this.roomPeds.clear()
     this.floor = genFloor(1)
+    this.convertAngelRoom()
     this.enterRoom(this.floor.startKey, null)
   }
 
@@ -423,6 +432,8 @@ export class Game {
       itemIds: this.runItems.slice(),
       curseIds: this.runCurses.slice(),
       endless: this.endless,
+      devilDeals: this.devilDeals,
+      winRecorded: this.winRecorded,
       activeId: this.active ? this.active.id : null,
       activeCharge: this.activeCharge,
       gold: this.runGold,
@@ -458,6 +469,11 @@ export class Game {
     this.runCurses = (s.curseIds || []).filter(id => CURSE_BY_ID.has(id))
     this.curses = computeCurses(this.runCurses)
     this.endless = !!s.endless
+    this.devilDeals = s.devilDeals || 0
+    // 已发过的通关奖励不能因为读档再发一次
+    this.winRecorded = !!s.winRecorded
+    this.challengeActive = false
+    this.challengeWave = 0
     // 生命上限按「当前装备 + 本局道具」重算，而不是直接信存档里的数字：
     // 玩家可能在家园换过装备，直接沿用会和其他属性口径不一致。
     // 但只抬上限不回血，避免"退出换装再进来"变成回血手段。
@@ -648,8 +664,17 @@ export class Game {
   /** 首次进入房间时生成内容 */
   populateRoom(r: RoomDef) {
     // 起始房与各类特殊房都是安全区，不刷怪
-    if (r.type === 'start' || r.type === 'treasure' || r.type === 'shop' || r.type === 'devil') {
+    if (r.type === 'start' || r.type === 'treasure' || r.type === 'shop' || r.type === 'devil' || r.type === 'angel') {
       r.cleared = true
+      return
+    }
+    if (r.type === 'challenge') {
+      // 挑战房进门即开打，三波连续，门在打完前锁死
+      this.challengeActive = true
+      this.challengeWave = 1
+      this.spawnWave(1)
+      this.float(ROOM_W / 2, ROOM_H / 2 - 44, '挑战开始！第 1 / 3 波', '#ff9f4f', 12)
+      sfx.boss()
       return
     }
 
@@ -726,6 +751,22 @@ export class Game {
         return { x: ROOM_W / 2 + (i === 0 ? -80 : 80), y: cy, item, act: null, price: 22 + this.depth * 3, kind: 'hp' as const, taken: false }
       })
     }
+    if (r.type === 'angel') {
+      // 天使房：两件白送的高稀有度道具，作为「不与恶魔交易」的回报
+      return [0, 1].map(i => ({
+        x: ROOM_W / 2 + (i === 0 ? -80 : 80), y: cy,
+        item: rollRunItem(luck + 55), act: null,
+        price: 0, kind: 'free' as const, taken: false,
+      }))
+    }
+    if (r.type === 'challenge') {
+      // 挑战房：奖励台先锁着，打完三波才开放
+      return [{
+        x: ROOM_W / 2, y: cy,
+        item: rollRunItem(luck + 60), act: null,
+        price: 0, kind: 'free' as const, taken: false,
+      }]
+    }
     // 普通房有概率出现诅咒祭坛：接受一条永久诅咒，换一件高稀有度道具
     if (r.type === 'normal' && chance(0.2)) {
       const curse = rollCurse(this.runCurses)
@@ -740,11 +781,47 @@ export class Game {
     return []
   }
 
+  /** 挑战房的一波敌人。越往后越猛 */
+  spawnWave(wave: number) {
+    const n = 4 + wave * 2 + Math.floor(this.depth * 0.8)
+    const pool: EnemyKind[] = this.depth >= 3
+      ? ['slime', 'bat', 'skel', 'bomber', 'turret']
+      : ['slime', 'bat', 'skel', 'bomber']
+    for (let i = 0; i < n; i++) {
+      const a = (Math.PI * 2 * i) / n + rand(-0.2, 0.2)
+      const rad = rand(70, Math.min(ROOM_W, ROOM_H) * 0.42)
+      const x = clamp(ROOM_W / 2 + Math.cos(a) * rad, 30, ROOM_W - 30)
+      const y = clamp(ROOM_H / 2 + Math.sin(a) * rad, 30, ROOM_H - 30)
+      this.spawnEnemyAt(pick(pool), x, y)
+    }
+    // 最后一波压一只精英
+    if (wave >= 3) {
+      this.spawnEnemyAt('elite', ROOM_W / 2, ROOM_H * 0.3)
+      this.float(ROOM_W / 2, ROOM_H * 0.3 - 30, '精英登场！', '#ff9f4f', 11)
+    }
+  }
+
   /** 房间是否已清空（无存活敌人） */
   checkRoomClear() {
     const r = this.room
     if (r.cleared) return
     if (this.enemies.some(e => !e.dead)) return
+
+    // 挑战房：清空只代表一波结束，还有后续就继续刷
+    if (r.type === 'challenge' && this.challengeActive && this.challengeWave < 3) {
+      this.challengeWave++
+      this.spawnWave(this.challengeWave)
+      this.float(this.px, this.py - 34, `第 ${this.challengeWave} / 3 波`, '#ff9f4f', 12)
+      this.shake = 0.5
+      sfx.boss()
+      return
+    }
+    if (r.type === 'challenge') {
+      this.challengeActive = false
+      this.float(ROOM_W / 2, ROOM_H / 2 - 44, '挑战完成！奖励已开启', '#ffd75e', 12)
+      this.burst(ROOM_W / 2, ROOM_H / 2, '#ffd75e', 30)
+      this.runGold += 60 + this.depth * 15
+    }
     r.cleared = true
     sfx.levelup()
     this.float(this.px, this.py - 30, '房间清空！', '#57e6a0', 10)
@@ -808,9 +885,18 @@ export class Game {
     o.y = clamp(o.y, -6, ROOM_H + 6)
   }
 
+  /** 一次恶魔交易都没做过时，恶魔房转为天使房：对克制的回报 */
+  convertAngelRoom() {
+    if (this.devilDeals > 0) return
+    for (const r of this.floor.rooms.values()) {
+      if (r.type === 'devil') { r.type = 'angel'; return }
+    }
+  }
+
   nextFloor() {
     this.depth++
     this.floor = genFloor(this.depth)
+    this.convertAngelRoom()
     // 房间 key 只有 gx,gy，跨层会重复 —— 不清空的话新层会继承上一层的地形（含已打碎的石头）
     this.roomObs.clear()
     this.roomPeds.clear()
@@ -1094,7 +1180,13 @@ export class Game {
         }
         this.hp -= p.price
         this.hurtFlash = 1
+        this.devilDeals++ // 做过交易就不会再出天使房
         sfx.hurt()
+      }
+      // 挑战房的奖励台必须打完波次才能拿
+      if (this.room.type === 'challenge' && !this.room.cleared) {
+        if (this.frameT % 0.5 < 0.02) this.float(p.x, p.y - 30, '击退全部波次后开启', '#9aa4c8', 8)
+        continue
       }
 
       p.taken = true
@@ -2916,6 +3008,8 @@ export class Game {
       else if (r.type === 'treasure') g.fillStyle = '#ffd75e'
       else if (r.type === 'shop') g.fillStyle = '#57e6a0'
       else if (r.type === 'devil') g.fillStyle = '#b98cff'
+      else if (r.type === 'angel') g.fillStyle = '#ffe9a8'
+      else if (r.type === 'challenge') g.fillStyle = '#ff9f4f'
       else g.fillStyle = r.cleared ? '#3f4870' : '#5c6285'
       g.fillRect(x, y, cell, cell)
       if (cur) {
@@ -2946,6 +3040,7 @@ export class Game {
       g.fillStyle = r.type === 'boss' ? '#ff4f6b' : r.type === 'treasure' ? '#ffd75e' : '#9aa4c8'
       const tn = r.type === 'boss' ? 'BOSS 房' : r.type === 'treasure' ? '宝箱房'
         : r.type === 'shop' ? '商店' : r.type === 'devil' ? '恶魔房'
+        : r.type === 'angel' ? '天使房' : r.type === 'challenge' ? `挑战房 ${this.challengeWave}/3`
         : r.type === 'start' ? '起始房' : '战斗房'
       g.fillText(`${tn}${r.cleared ? '' : ' · 门已锁'}`, 4, 26)
     }
