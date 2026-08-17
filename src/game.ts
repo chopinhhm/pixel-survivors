@@ -9,6 +9,7 @@ import { Floor, RoomDef, Dir, DIRS, DIR_LIST, genFloor, rkey, hasDoor } from './
 import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
 import { RunStats, RunItem, ActiveItem, baseStats, computeStats, rollRunItem, rollActive, ITEM_BY_ID, ACTIVE_BY_ID } from './runitems'
 import { makeEmblem } from './sprites'
+import { CHARS, CharDef, getChar } from './chars'
 
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
 const ENEMY_DRAW_SCALE: Record<string, number> = {
@@ -36,13 +37,14 @@ const CROSS_ROW = Math.round((ROOM_H / 2 - OBY) / OB_CELL - 0.5)
 type ObKind = 'rock' | 'spike' | 'pit'
 interface Ob { col: number; row: number; kind: ObKind; hp: number; maxHp: number; flash: number }
 
-type State = 'menu' | 'hub' | 'inventory' | 'play' | 'pause' | 'end'
+type State = 'menu' | 'hub' | 'inventory' | 'charselect' | 'play' | 'pause' | 'end'
 
 // ---------- 家园布局（世界坐标，玩家在家园从 0,0 出生）----------
 const HUB = { x0: -180, x1: 180, y0: -160, y1: 140 }
 const PORTAL = { x: 0, y: -118 }
 const STASH = { x: -96, y: 46 }
 const FORGE = { x: 96, y: 46 }
+const STATUE = { x: 0, y: 62 }
 const FORGE_COST = 60
 type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner'
 
@@ -227,8 +229,13 @@ export class Game {
   private eqCache: Record<StatKey, number> = statTotal(this.profile.eq)
   get eq(): Record<StatKey, number> { return this.eqCache }
   refreshEq() { this.eqCache = statTotal(this.profile.eq) }
-  // 局内道具(stats) × 局外装备(eq) 双层叠加
-  get spd() { return 72 * this.stats.moveSpd * (1 + this.eq.spd / 100) }
+  /** 本局所用角色。局内固定，切换只在家园生效 */
+  runChar: CharDef = getChar(this.profile.char)
+  /** 角色基础生命上限 */
+  get baseHp() { return this.runChar.hp }
+
+  // 角色 × 局内道具(stats) × 局外装备(eq) 三层叠加
+  get spd() { return 72 * this.runChar.spdMul * this.stats.moveSpd * (1 + this.eq.spd / 100) }
   get magnetR() { return 28 * this.stats.magnet * (1 + this.eq.magnet / 100) }
   get goldMul() { return this.stats.goldMul * (1 + this.eq.xp / 100) }
   get regen() { return this.stats.regen + this.eq.regen }
@@ -267,7 +274,7 @@ export class Game {
     const prevMax = this.stats.maxHp
     this.stats = computeStats(this.runItems)
     const gained = this.stats.maxHp - prevMax
-    this.maxHp = 100 + this.eq.maxHp + this.stats.maxHp
+    this.maxHp = this.baseHp + this.eq.maxHp + this.stats.maxHp
     this.hp = Math.min(this.maxHp, this.hp + Math.max(0, gained))
   }
 
@@ -285,12 +292,14 @@ export class Game {
     this.t = 0; this.kills = 0; this.shake = 0
     this.px = ROOM_W / 2; this.py = ROOM_H / 2
     this.camX = 0; this.camY = 0
-    this.runItems = []
-    this.stats = baseStats()
+    // 锁定本局角色：局内不受家园里切换的影响
+    this.runChar = getChar(this.profile.char)
+    this.runItems = this.runChar.startItems.filter(id => ITEM_BY_ID.has(id))
+    this.stats = computeStats(this.runItems)
     this.fireT = 0; this.orbAng = 0; this.boltT = 0
-    this.maxHp = 100 + this.eq.maxHp // 装备提供的生命上限
+    this.maxHp = this.baseHp + this.eq.maxHp + this.stats.maxHp
     this.hp = this.maxHp; this.invuln = 0
-    this.runLoot = []; this.runGold = 0
+    this.runLoot = []; this.runGold = this.runChar.startGold
     this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0; this.dashBuf = 0
     this.hitStop = 0; this.hurtFlash = 0
     this.depth = 1
@@ -362,6 +371,7 @@ export class Game {
   snapshotRun() {
     const snap: RunSave = {
       v: RUN_SAVE_VER,
+      charId: this.runChar.id,
       depth: this.depth,
       curKey: this.curKey,
       startKey: this.floor.startKey,
@@ -403,7 +413,8 @@ export class Game {
     // 生命上限按「当前装备 + 本局道具」重算，而不是直接信存档里的数字：
     // 玩家可能在家园换过装备，直接沿用会和其他属性口径不一致。
     // 但只抬上限不回血，避免"退出换装再进来"变成回血手段。
-    this.maxHp = 100 + this.eq.maxHp + this.stats.maxHp
+    this.runChar = getChar(s.charId)
+    this.maxHp = this.baseHp + this.eq.maxHp + this.stats.maxHp
     this.hp = clamp(s.hp, 1, this.maxHp)
     this.active = s.activeId ? (ACTIVE_BY_ID.get(s.activeId) ?? null) : null
     this.activeCharge = s.activeCharge
@@ -773,6 +784,9 @@ export class Game {
       case 'inventory':
         this.updateInventory()
         break
+      case 'charselect':
+        this.updateCharSelect()
+        break
       case 'play':
         if (Input.pressed('p') || Input.pressed('escape')) { this.state = 'pause'; break }
         this.updatePlay(dt)
@@ -840,7 +854,9 @@ export class Game {
     this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
     this.hitStop = 0; this.hurtFlash = 0; this.invuln = 0
     this.parts = []; this.floats = []
-    this.hp = this.maxHp = 100 + this.eq.maxHp
+    // 家园里预览当前选中角色的血量
+    this.runChar = getChar(this.profile.char)
+    this.hp = this.maxHp = this.baseHp + this.eq.maxHp
   }
 
   hubSay(msg: string) { this.hubMsg = msg; this.hubMsgT = 2.2 }
@@ -856,6 +872,7 @@ export class Game {
     const nearPortal = dist2(this.px, this.py, PORTAL.x, PORTAL.y) < 26 * 26
     const nearStash = dist2(this.px, this.py, STASH.x, STASH.y) < 24 * 24
     const nearForge = dist2(this.px, this.py, FORGE.x, FORGE.y) < 24 * 24
+    const nearStatue = dist2(this.px, this.py, STATUE.x, STATUE.y) < 24 * 24
 
     // 传送门粒子
     if (chance(0.5)) {
@@ -868,7 +885,9 @@ export class Game {
     }
 
     if (Input.pressed('i')) { this.state = 'inventory'; return }
+    if (Input.pressed('c')) { this.state = 'charselect'; return }
     if (Input.pressed('e')) {
+      if (nearStatue) { this.state = 'charselect'; return }
       if (nearPortal) {
         // 有未完成的存档就接着打，否则开新的一局
         if (this.pendingRun) {
@@ -2069,6 +2088,115 @@ export class Game {
     }
   }
 
+  // ================================================================
+  // 角色选择
+  // ================================================================
+  charRects(): { x: number; y: number; w: number; h: number }[] {
+    const cw = 132, ch = 150, gap = 12
+    const total = cw * CHARS.length + gap * (CHARS.length - 1)
+    const x0 = (VW - total) / 2
+    const y = (VH - ch) / 2 + 8
+    return CHARS.map((_, i) => ({ x: x0 + i * (cw + gap), y, w: cw, h: ch }))
+  }
+
+  updateCharSelect() {
+    if (Input.pressed('escape') || Input.pressed('c')) { this.state = 'hub'; return }
+    if (!Input.mclick) return
+    const rects = this.charRects()
+    for (let i = 0; i < CHARS.length; i++) {
+      const r = rects[i]
+      if (Input.mx < r.x || Input.mx > r.x + r.w || Input.my < r.y || Input.my > r.y + r.h) continue
+      const c = CHARS[i]
+      const owned = this.profile.chars.includes(c.id)
+      if (owned) {
+        this.profile.char = c.id
+        this.runChar = c
+        this.hp = this.maxHp = this.baseHp + this.eq.maxHp
+        saveProfile(this.profile)
+        sfx.pickup()
+      } else if (this.profile.gold >= c.cost) {
+        this.profile.gold -= c.cost
+        this.profile.chars.push(c.id)
+        this.profile.char = c.id
+        this.runChar = c
+        this.hp = this.maxHp = this.baseHp + this.eq.maxHp
+        saveProfile(this.profile)
+        sfx.levelup()
+      } else {
+        this.hubSay(`金币不足（需要 ${c.cost}）`)
+        sfx.hurt()
+      }
+      return
+    }
+  }
+
+  drawCharSelect() {
+    const g = this.g
+    g.fillStyle = 'rgba(7,7,13,0.93)'
+    g.fillRect(0, 0, VW, VH)
+    g.textAlign = 'center'
+    g.font = 'bold 15px monospace'
+    g.fillStyle = '#ffd75e'
+    g.fillText('选 择 角 色', VW / 2, 34)
+    g.font = '8px monospace'
+    g.fillStyle = '#9aa4c8'
+    g.fillText('点击选择 · 未解锁的用金币购买 · ESC / C 返回', VW / 2, 50)
+    g.textAlign = 'right'
+    g.font = 'bold 10px monospace'
+    g.fillStyle = '#ffd75e'
+    g.fillText(`金币 ${this.profile.gold}`, VW - 14, 34)
+
+    const rects = this.charRects()
+    CHARS.forEach((c, i) => {
+      const r = rects[i]
+      const owned = this.profile.chars.includes(c.id)
+      const sel = this.profile.char === c.id
+      const hover = Input.mx >= r.x && Input.mx <= r.x + r.w && Input.my >= r.y && Input.my <= r.y + r.h
+      const afford = this.profile.gold >= c.cost
+
+      g.fillStyle = sel ? '#232743' : '#171a2e'
+      g.fillRect(r.x, r.y, r.w, r.h)
+      g.strokeStyle = sel ? c.color : hover ? '#ffd75e' : '#3a3f66'
+      g.lineWidth = sel ? 2 : 1
+      g.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1)
+      g.lineWidth = 1
+
+      // 立绘（同一套骑士贴图，靠色相区分）
+      const spr = frame('player_idle', Math.floor(this.frameT * 5) % 4) as CanvasImageSource
+      const kh = 56, kw = 32
+      if (!owned) g.filter = 'grayscale(1) brightness(0.45)'
+      else if (c.tint) g.filter = c.tint
+      g.drawImage(spr, r.x + r.w / 2 - kw / 2, r.y + 12, kw, kh)
+      g.filter = 'none'
+
+      g.textAlign = 'center'
+      g.font = 'bold 11px monospace'
+      g.fillStyle = owned ? c.color : '#5c6285'
+      g.fillText(c.name, r.x + r.w / 2, r.y + 84)
+
+      g.font = '7px monospace'
+      g.fillStyle = '#9aa4c8'
+      this.wrapText(c.desc, r.x + r.w / 2, r.y + 98, r.w - 14, 10)
+
+      // 关键数值
+      g.font = '7px monospace'
+      g.fillStyle = '#57c7ff'
+      g.fillText(`生命 ${c.hp} · 移速 ${Math.round(c.spdMul * 100)}%`, r.x + r.w / 2, r.y + 122)
+      if (c.startItems.length || c.startGold) {
+        const bits: string[] = c.startItems.map(id => ITEM_BY_ID.get(id)?.name || id)
+        if (c.startGold) bits.push(`${c.startGold} 金币`)
+        g.fillStyle = '#57e6a0'
+        g.fillText('开局：' + bits.join(' + '), r.x + r.w / 2, r.y + 132)
+      }
+
+      // 状态
+      g.font = 'bold 8px monospace'
+      if (sel) { g.fillStyle = c.color; g.fillText('● 已选中', r.x + r.w / 2, r.y + r.h - 8) }
+      else if (owned) { g.fillStyle = '#9aa4c8'; g.fillText('点击选择', r.x + r.w / 2, r.y + r.h - 8) }
+      else { g.fillStyle = afford ? '#ffd75e' : '#ff6b6b'; g.fillText(`${c.cost} 金币解锁`, r.x + r.w / 2, r.y + r.h - 8) }
+    })
+  }
+
   // ---------- 特效 ----------
   burst(x: number, y: number, color: string, n: number) {
     for (let i = 0; i < n && this.parts.length < 300; i++) {
@@ -2103,6 +2231,7 @@ export class Game {
     if (this.state === 'menu') { this.drawMenu(); return }
     if (this.state === 'hub') { this.drawHub(); return }
     if (this.state === 'inventory') { this.drawHub(); this.drawInventory(); return }
+    if (this.state === 'charselect') { this.drawHub(); this.drawCharSelect(); return }
 
     // 房间制：相机固定，一屏一间，只有震动会偏移
     const sx = Math.round(this.shake > 0 ? rand(-3, 3) * this.shake : 0)
@@ -2323,8 +2452,10 @@ export class Game {
       const pf = Math.floor(this.frameT * (this.moving || this.dashT > 0 ? 12 : 5)) % 4
       const pimg = frame(key, pf, this.face < 0) as CanvasImageSource
       this.shadow(W(this.px), H(this.py) + 13, 6)
+      // 无敌/冲刺的状态提示优先，其次才是角色色调
       if (this.invuln > 0 && this.dashT <= 0) g.filter = 'brightness(1.6)'
-      if (this.dashT > 0) g.filter = 'brightness(1.4) saturate(1.6)'
+      else if (this.dashT > 0) g.filter = 'brightness(1.4) saturate(1.6)'
+      else if (this.runChar.tint) g.filter = this.runChar.tint
       g.drawImage(pimg, Math.round(W(this.px) - 8), Math.round(H(this.py) - 14))
       g.filter = 'none'
     }
@@ -2860,11 +2991,23 @@ export class Game {
     }
     g.globalAlpha = 1
 
+    // ---- 角色雕像（选择角色）----
+    this.shadow(W(STATUE.x), H(STATUE.y) + 8, 9)
+    this.glow(W(STATUE.x), H(STATUE.y) - 2, 14, this.runChar.color, 0.35)
+    g.fillStyle = '#4a4a63'
+    g.fillRect(Math.round(W(STATUE.x) - 8), Math.round(H(STATUE.y) + 2), 16, 6)
+    const statueSpr = frame('player_idle', 0) as CanvasImageSource
+    if (this.runChar.tint) g.filter = this.runChar.tint
+    g.drawImage(statueSpr, Math.round(W(STATUE.x) - 8), Math.round(H(STATUE.y) - 16))
+    g.filter = 'none'
+
     // ---- 玩家 ----
     const key = this.moving || this.dashT > 0 ? 'player_run' : 'player_idle'
     const pf = Math.floor(this.frameT * (this.moving ? 12 : 5)) % 4
     this.shadow(W(this.px), H(this.py) + 13, 6)
+    if (this.runChar.tint) g.filter = this.runChar.tint
     g.drawImage(frame(key, pf, this.face < 0) as CanvasImageSource, Math.round(W(this.px) - 8), Math.round(H(this.py) - 14))
+    g.filter = 'none'
 
     // ---- 交互标签 ----
     g.textAlign = 'center'
@@ -2881,11 +3024,13 @@ export class Game {
     const nearPortal = dist2(this.px, this.py, PORTAL.x, PORTAL.y) < 26 * 26
     const nearStash = dist2(this.px, this.py, STASH.x, STASH.y) < 24 * 24
     const nearForge = dist2(this.px, this.py, FORGE.x, FORGE.y) < 24 * 24
+    const nearStatue = dist2(this.px, this.py, STATUE.x, STATUE.y) < 24 * 24
     label(PORTAL.x, PORTAL.y - 26,
       this.pendingRun ? `传送门 · 继续第 ${this.pendingRun.depth} 层` : '传送门 · 出发冒险',
       nearPortal, this.pendingRun ? '#57e6a0' : '#b98cff')
     label(STASH.x, STASH.y - 18, '储物箱 · 背包', nearStash, '#57c7ff')
     label(FORGE.x, FORGE.y - 18, `熔炉 · 锻造(${FORGE_COST}金)`, nearForge, '#ff9f4f')
+    label(STATUE.x, STATUE.y - 22, `雕像 · 角色(${this.runChar.name})`, nearStatue, this.runChar.color)
 
     // ---- HUD ----
     g.textAlign = 'left'
@@ -2903,7 +3048,7 @@ export class Game {
     }
     g.textAlign = 'right'
     g.fillStyle = '#5c6285'
-    g.fillText('WASD 移动 · E 交互 · I 背包', VW - 8, 18)
+    g.fillText('WASD 移动 · E 交互 · I 背包 · C 角色', VW - 8, 18)
 
     // 家园提示消息
     if (this.hubMsgT > 0) {

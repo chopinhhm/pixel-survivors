@@ -11,6 +11,10 @@ export interface Profile {
   eq: Record<Slot, Item | null>
   best: Best
   runs: number
+  /** 已解锁的角色 id */
+  chars: string[]
+  /** 当前选中的角色 id */
+  char: string
 }
 
 const KEY = 'pxsurv-profile'
@@ -25,6 +29,8 @@ export function emptyProfile(): Profile {
     eq: { weapon: null, armor: null, ring: null, amulet: null },
     best: { time: 0, kills: 0, wins: 0, depth: 0 },
     runs: 0,
+    chars: ['knight'],
+    char: 'knight',
   }
 }
 
@@ -40,6 +46,9 @@ export function loadProfile(): Profile {
         inv: Array.isArray(p.inv) ? p.inv : [],
         eq: { ...base.eq, ...(p.eq || {}) },
         best: { ...base.best, ...(p.best || {}) },
+        // 老存档没有角色字段，回落到初始角色
+        chars: Array.isArray(p.chars) && p.chars.length ? p.chars : base.chars,
+        char: p.char || base.char,
       }
     }
     // 迁移旧版只存纪录的存档，避免老玩家纪录丢失
@@ -60,7 +69,8 @@ export function saveProfile(p: Profile) {
 // JSON 序列化会把函数丢掉，读回来就是个空壳，必须靠 id 重新查表还原。
 
 const RUN_KEY = 'pxsurv-run'
-const RUN_VER = 1
+// v2: 增加 charId。旧档缺这个字段会按错误的基础血量恢复，直接作废更安全
+const RUN_VER = 2
 
 export interface SavedRoom {
   gx: number; gy: number; type: string
@@ -76,6 +86,7 @@ export interface SavedPed {
 
 export interface RunSave {
   v: number
+  charId: string
   depth: number
   curKey: string
   startKey: string
