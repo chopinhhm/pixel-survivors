@@ -10,6 +10,7 @@ import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
 import {
   RunStats, RunItem, ActiveItem, Curse, CurseMods,
   baseStats, computeStats, rollRunItem, rollActive, rollCurse, computeCurses, baseCurses,
+  activeSynergies,
   ITEM_BY_ID, ACTIVE_BY_ID, CURSE_BY_ID,
 } from './runitems'
 import { makeEmblem } from './sprites'
@@ -91,6 +92,7 @@ interface Enemy {
   slow: number // 寒霜减速剩余时间
   burn: number; burnT: number // 炼狱光环的持续燃烧
   bossId: BossId | null // Boss 专属招式分支
+  enraged: boolean // Boss 半血狂暴
   atkT: number // 远程攻击冷却（骷髅）
   dashT: number; dashCd: number; dashDx: number; dashDy: number // 小恶魔突进方向
   chargeT: number; chargeCd: number; chargeAng: number // 精英/Boss 冲锋
@@ -293,12 +295,25 @@ export class Game {
 
   /** 拾取道具后重算属性；生命上限变化要同步补血 */
   addRunItem(item: RunItem) {
+    // 先记下已有协同，拾取后对比出「新触发的」才好播报
+    const before = new Set(activeSynergies(this.runItems).map(s => s.id))
     this.runItems.push(item.id)
     const prevMax = this.stats.maxHp
     this.stats = computeStats(this.runItems)
     const gained = this.stats.maxHp - prevMax
     this.maxHp = this.computeMaxHp()
     this.hp = Math.min(this.maxHp, this.hp + Math.max(0, gained))
+
+    // 新凑出的协同要给足仪式感 —— 这是玩家开下一局的动力
+    for (const sy of activeSynergies(this.runItems)) {
+      if (before.has(sy.id)) continue
+      this.float(this.px, this.py - 52, `★ 协同：${sy.name}`, sy.color, 13)
+      this.float(this.px, this.py - 40, sy.desc, '#ffffff', 8)
+      this.burst(this.px, this.py, sy.color, 34)
+      this.shake = 0.7
+      this.hitStop = 0.16
+      sfx.win()
+    }
   }
 
   // 鼠标在房间局部坐标中的位置（房间制下相机固定，直接减去房间原点）
@@ -1219,6 +1234,7 @@ export class Game {
       flash: 0, auraCd: 0, orbCd: 0,
       burn: 0, burnT: 0,
       bossId: null,
+      enraged: false,
       atkT: rand(1.5, 3),
       dashT: 0, dashCd: rand(1, 2.5), dashDx: 0, dashDy: 0,
       chargeT: 0, chargeCd: rand(2, 4), chargeAng: 0,
@@ -1366,14 +1382,25 @@ export class Game {
           break
         }
         case 'boss': {
+          // 半血狂暴：出招更密、移动更快，给 Boss 战一个明确的转折点
+          if (!e.enraged && e.hp <= e.maxHp * 0.5) {
+            e.enraged = true
+            e.specialT = 0.5
+            this.shake = 1
+            this.hitStop = 0.18
+            this.burst(e.x, e.y, '#ff4f6b', 40)
+            this.float(e.x, e.y - 34, '狂暴！', '#ff4f6b', 14)
+            sfx.boss()
+          }
+          const rage = e.enraged ? 1.45 : 1
           // 所有 Boss 共用「蓄力冲锋」骨架，招式分支按 bossId 区分
-          e.chargeCd -= dt
+          e.chargeCd -= dt * rage
           if (e.chargeT > 0) {
             e.chargeT -= dt
             if (e.chargeT < 0.8) {
               moveX = Math.cos(e.chargeAng)
               moveY = Math.sin(e.chargeAng)
-              spd = e.bossId === 'ogre' ? 210 : 145 // 食人魔以冲锋为主，冲得更凶
+              spd = (e.bossId === 'ogre' ? 210 : 145) * rage // 食人魔以冲锋为主，冲得更凶
             } else {
               spd = 0 // 预警原地
             }
@@ -1382,10 +1409,12 @@ export class Game {
             e.chargeT = 1.25
             e.chargeAng = Math.atan2(dy, dx)
           } else {
-            e.specialT -= dt
+            e.specialT -= dt * rage
             if (e.specialT <= 0) {
               e.specialT = e.bossId === 'skelking' ? 2.4 : 3.2
               this.bossAttack(e, dx, dy, d)
+              // 狂暴后追加一次错开的补射，弹幕密度明显上一档
+              if (e.enraged) this.bossAttack(e, dx + rand(-40, 40), dy + rand(-40, 40), d)
             }
           }
           break
@@ -2581,6 +2610,8 @@ export class Game {
       else if (e.flash > 0) g.filter = 'brightness(4) saturate(0.5)'
       // 自爆怪引信期间剧烈闪烁警示
       else if (e.kind === 'bomber' && e.atkT > 0) g.filter = Math.floor(this.frameT * 16) % 2 === 0 ? 'brightness(3) saturate(2)' : (ENEMY_TINT.bomber || 'none')
+      // 狂暴 Boss 持续泛红脉动，状态一眼可辨
+      else if (e.enraged) g.filter = `brightness(${(1.25 + Math.sin(this.frameT * 8) * 0.2).toFixed(2)}) saturate(2.4) hue-rotate(330deg)`
       else if (e.bossId && BOSS_BY_ID.get(e.bossId)?.tint) g.filter = BOSS_BY_ID.get(e.bossId)!.tint!
       else if (ENEMY_TINT[e.kind]) g.filter = ENEMY_TINT[e.kind]!
       g.drawImage(img, Math.round(W(e.x) - iw / 2), Math.round(H(e.y) - ih / 2), iw, ih)
@@ -2952,7 +2983,9 @@ export class Game {
       g.textAlign = 'center'
       g.fillStyle = '#ffffff'
       const bn = this.boss.bossId ? BOSS_BY_ID.get(this.boss.bossId)?.name : null
-      g.fillText(this.depth >= FINAL_DEPTH ? `最终 BOSS · ${bn ?? ''}` : (bn ?? 'BOSS'), VW / 2, VH - 17)
+      const rageTag = this.boss.enraged ? ' [狂暴]' : ''
+      if (this.boss.enraged) g.fillStyle = '#ff4f6b'
+      g.fillText((this.depth >= FINAL_DEPTH && !this.endless ? `最终 BOSS · ${bn ?? ''}` : (bn ?? 'BOSS')) + rageTag, VW / 2, VH - 17)
     }
     // 开场提示
     if (this.t < 8) {
@@ -3127,6 +3160,19 @@ export class Game {
       g.fillStyle = it.color
       g.fillText(`${it.name}${n > 1 ? ` x${n}` : ''}`, rx, ry)
       ry += 11
+    }
+    // 已激活的协同：这是玩家最想确认的东西
+    const syns = activeSynergies(this.runItems)
+    if (syns.length) {
+      ry += 6
+      g.font = 'bold 9px monospace'
+      g.fillStyle = '#ffd75e'
+      g.fillText(`★ 已激活协同 (${syns.length})`, rx, ry); ry += 13
+      g.font = '8px monospace'
+      for (const sy of syns) {
+        g.fillStyle = sy.color
+        g.fillText(sy.name, rx, ry); ry += 11
+      }
     }
     if (this.runCurses.length) {
       ry += 6

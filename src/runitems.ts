@@ -156,6 +156,79 @@ export const RUN_ITEMS: RunItem[] = [
 
 export const ITEM_BY_ID = new Map(RUN_ITEMS.map(i => [i.id, i]))
 
+// ---------------- 协同：特定组合触发的命名效果 ----------------
+// 单纯的属性叠加是线性的，玩家算得出来。协同是非线性的惊喜 ——
+// "我凑出了一个有名字的东西" 才是以撒让人想开下一局的原因。
+
+export interface Synergy {
+  id: string
+  name: string
+  desc: string
+  color: string
+  /** 需要同时持有的道具 id */
+  requires: string[]
+  apply(s: RunStats): void
+}
+
+export const SYNERGIES: Synergy[] = [
+  {
+    id: 'chaosstorm', name: '混沌风暴', desc: '分裂弹继承弹射，满屏乱窜',
+    color: '#b98cff', requires: ['split', 'bounce'],
+    apply: s => { s.bounce += 2; s.split += 1 },
+  },
+  {
+    id: 'orbitalstrike', name: '轨道轰炸', desc: '爆炸范围与威力翻倍',
+    color: '#ff7f3f', requires: ['explode', 'big'],
+    apply: s => { s.explode *= 2; s.size *= 1.15 },
+  },
+  {
+    id: 'deathwing', name: '死亡之翼', desc: '追踪与穿透大幅强化',
+    color: '#ff6b6b', requires: ['homing', 'pierce'],
+    apply: s => { s.homing += 1.5; s.pierce += 2 },
+  },
+  {
+    id: 'inferno', name: '烈焰地狱', desc: '光环灼烧翻倍，点燃层数提升',
+    color: '#ff5a28', requires: ['burn', 'aura'],
+    apply: s => { s.aura *= 2; s.burn += 3 },
+  },
+  {
+    id: 'iceage', name: '冰川纪元', desc: '闪电链附带冻结，冻结强度拉满',
+    color: '#8fd8ff', requires: ['freeze', 'chain'],
+    apply: s => { s.freeze = Math.min(0.8, s.freeze + 0.25); s.chain += 2 },
+  },
+  {
+    id: 'ballista', name: '千机弩', desc: '弹幕密度与射速再上一层',
+    color: '#57e6a0', requires: ['trident', 'rapid'],
+    apply: s => { s.rate *= 1.3; s.count += 1 },
+  },
+  {
+    id: 'vampirelord', name: '吸血鬼王', desc: '暴击与吸血互相放大',
+    color: '#b13e53', requires: ['vamp', 'crit'],
+    apply: s => { s.vamp *= 2.2; s.crit += 0.1 },
+  },
+  {
+    id: 'thundergod', name: '雷神之怒', desc: '落雷频率翻倍并强化连锁',
+    color: '#bee6ff', requires: ['stormcloud', 'chain'],
+    apply: s => { s.bolt *= 2; s.chain += 1 },
+  },
+  {
+    id: 'shotgunking', name: '散弹之王', desc: '霰弹收拢成致命扇面',
+    color: '#ff9f4f', requires: ['scatter', 'laser'],
+    apply: s => { s.dmg *= 1.5; s.range *= 1.3 },
+  },
+  {
+    id: 'singularity', name: '奇点坍缩', desc: '分裂弹自带爆炸',
+    color: '#c78cff', requires: ['blackhole', 'split'],
+    apply: s => { s.explode += 0.8; s.split += 1 },
+  },
+]
+
+/** 返回当前道具组合已激活的协同 */
+export function activeSynergies(ids: string[]): Synergy[] {
+  const owned = new Set(ids)
+  return SYNERGIES.filter(sy => sy.requires.every(r => owned.has(r)))
+}
+
 // ---------------- 主动技能：清房充能，按 Q 释放 ----------------
 // 被动是"堆出来的强度"，主动是"用出来的时机" —— 补上操作深度那一层
 export interface ActiveItem {
@@ -245,10 +318,11 @@ export function rollCurse(taken: string[]): Curse | null {
   return pool[Math.floor(Math.random() * pool.length)]
 }
 
-/** 累积一组道具得到最终属性 */
+/** 累积一组道具得到最终属性。协同在道具之后结算，作用于已叠好的数值上 */
 export function computeStats(ids: string[]): RunStats {
   const s = baseStats()
   for (const id of ids) ITEM_BY_ID.get(id)?.apply(s)
+  for (const sy of activeSynergies(ids)) sy.apply(s)
   return s
 }
 
