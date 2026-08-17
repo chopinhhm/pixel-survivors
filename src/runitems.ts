@@ -185,6 +185,66 @@ export function rollActive(): ActiveItem {
   return ACTIVES[Math.floor(Math.random() * ACTIVES.length)]
 }
 
+// ---------------- 诅咒：自愿变难，换一件稀有道具 ----------------
+// 给玩家「自找难度」的空间。roguelite 后期最怕的是没有可选的压力来源，
+// 强度上去之后一路平推反而无聊 —— 诅咒把难度控制权交回玩家手里。
+
+export interface Curse {
+  id: string
+  name: string
+  desc: string
+  color: string
+}
+
+export const CURSES: Curse[] = [
+  { id: 'fragile', name: '易碎之咒', desc: '受到的伤害 +35%', color: '#ff4f6b' },
+  { id: 'poverty', name: '贫困之咒', desc: '金币获取 -50%', color: '#ffd75e' },
+  { id: 'frenzy', name: '狂乱之咒', desc: '敌人移速 +30%', color: '#ff9f4f' },
+  { id: 'swarm', name: '增殖之咒', desc: '每间房敌人数量 +50%', color: '#5ac54f' },
+  { id: 'frailty', name: '虚弱之咒', desc: '生命上限 -25%', color: '#b13e53' },
+  { id: 'greedmerchant', name: '奸商之咒', desc: '商店价格 +70%', color: '#57e6a0' },
+  { id: 'darkness', name: '黑暗之咒', desc: '视野大幅缩小', color: '#b98cff' },
+]
+
+export const CURSE_BY_ID = new Map(CURSES.map(c => [c.id, c]))
+
+export interface CurseMods {
+  dmgTaken: number   // 受伤倍率
+  goldMul: number
+  enemySpd: number
+  enemyCount: number
+  maxHpMul: number
+  shopMul: number
+  vision: number     // 视野倍率，越小越黑
+}
+
+export function baseCurses(): CurseMods {
+  return { dmgTaken: 1, goldMul: 1, enemySpd: 1, enemyCount: 1, maxHpMul: 1, shopMul: 1, vision: 1 }
+}
+
+export function computeCurses(ids: string[]): CurseMods {
+  const m = baseCurses()
+  for (const id of ids) {
+    switch (id) {
+      case 'fragile': m.dmgTaken *= 1.35; break
+      case 'poverty': m.goldMul *= 0.5; break
+      case 'frenzy': m.enemySpd *= 1.3; break
+      case 'swarm': m.enemyCount *= 1.5; break
+      case 'frailty': m.maxHpMul *= 0.75; break
+      case 'greedmerchant': m.shopMul *= 1.7; break
+      case 'darkness': m.vision *= 0.62; break
+    }
+  }
+  return m
+}
+
+/** 抽一条还没被接受过的诅咒；全接受过了返回 null */
+export function rollCurse(taken: string[]): Curse | null {
+  const pool = CURSES.filter(c => !taken.includes(c.id))
+  if (!pool.length) return null
+  return pool[Math.floor(Math.random() * pool.length)]
+}
+
 /** 累积一组道具得到最终属性 */
 export function computeStats(ids: string[]): RunStats {
   const s = baseStats()

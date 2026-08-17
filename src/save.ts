@@ -69,8 +69,9 @@ export function saveProfile(p: Profile) {
 // JSON 序列化会把函数丢掉，读回来就是个空壳，必须靠 id 重新查表还原。
 
 const RUN_KEY = 'pxsurv-run'
-// v2: 增加 charId。旧档缺这个字段会按错误的基础血量恢复，直接作废更安全
-const RUN_VER = 2
+// v2: 增加 charId（缺失会按错误基础血量恢复）
+// v3: 增加 curseIds / endless（缺失会让诅咒凭空消失、无尽模式退回通关判定）
+const RUN_VER = 3
 
 export interface SavedRoom {
   gx: number; gy: number; type: string
@@ -81,6 +82,7 @@ export interface SavedOb { col: number; row: number; kind: string; hp: number; m
 export interface SavedPed {
   x: number; y: number
   itemId: string | null; actId: string | null
+  curseId: string | null
   price: number; kind: string; taken: boolean
 }
 
@@ -94,6 +96,8 @@ export interface RunSave {
   hp: number
   maxHp: number
   itemIds: string[]
+  curseIds: string[]
+  endless: boolean
   activeId: string | null
   activeCharge: number
   gold: number

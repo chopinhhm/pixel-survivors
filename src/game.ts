@@ -7,7 +7,11 @@ import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, f
 import { Profile, loadProfile, saveProfile, INV_CAP, RunSave, RUN_SAVE_VER, saveRun, loadRun, clearRun } from './save'
 import { Floor, RoomDef, Dir, DIRS, DIR_LIST, genFloor, rkey, hasDoor } from './rooms'
 import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
-import { RunStats, RunItem, ActiveItem, baseStats, computeStats, rollRunItem, rollActive, ITEM_BY_ID, ACTIVE_BY_ID } from './runitems'
+import {
+  RunStats, RunItem, ActiveItem, Curse, CurseMods,
+  baseStats, computeStats, rollRunItem, rollActive, rollCurse, computeCurses, baseCurses,
+  ITEM_BY_ID, ACTIVE_BY_ID, CURSE_BY_ID,
+} from './runitems'
 import { makeEmblem } from './sprites'
 import { CHARS, CharDef, getChar } from './chars'
 
@@ -37,7 +41,7 @@ const CROSS_ROW = Math.round((ROOM_H / 2 - OBY) / OB_CELL - 0.5)
 type ObKind = 'rock' | 'spike' | 'pit'
 interface Ob { col: number; row: number; kind: ObKind; hp: number; maxHp: number; flash: number }
 
-type State = 'menu' | 'hub' | 'inventory' | 'charselect' | 'play' | 'pause' | 'end'
+type State = 'menu' | 'hub' | 'inventory' | 'charselect' | 'play' | 'pause' | 'end' | 'victory'
 
 // ---------- 家园布局（世界坐标，玩家在家园从 0,0 出生）----------
 const HUB = { x0: -180, x1: 180, y0: -160, y1: 140 }
@@ -111,7 +115,15 @@ interface Nova { x: number; y: number; r: number; maxR: number; dmg: number; hit
 interface Bolt { pts: number[]; life: number }
 interface Chest { x: number; y: number; opened: number }
 /** 道具台。price>0 时需要付费：gold 扣金币，hp 扣生命 */
-interface Pedestal { x: number; y: number; item: RunItem | null; act: ActiveItem | null; price: number; kind: 'free' | 'gold' | 'hp'; taken: boolean }
+interface Pedestal {
+  x: number; y: number
+  item: RunItem | null; act: ActiveItem | null
+  price: number
+  kind: 'free' | 'gold' | 'hp' | 'curse'
+  taken: boolean
+  /** kind==='curse' 时附带的诅咒 */
+  curse?: Curse | null
+}
 
 const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: number; r: number; xp: number; scale: number }> = {
   slime: { hp: 12, spd: 26, dmg: 8, r: 5, xp: 1, scale: 1 },
@@ -171,6 +183,13 @@ export class Game {
   runItems: string[] = []
   /** 累积后的属性，仅在拾取时重算 */
   stats: RunStats = baseStats()
+  /** 已接受的诅咒 id 与其累积修正 */
+  runCurses: string[] = []
+  curses: CurseMods = baseCurses()
+  /** 无尽模式：通关后选择继续深入 */
+  endless = false
+  /** 通关奖励是否已发放，防止 recordWin 与 endRun 重复记账 */
+  winRecorded = false
   fireT = 0
   orbAng = 0
   boltT = 0
@@ -233,15 +252,19 @@ export class Game {
   runChar: CharDef = getChar(this.profile.char)
   /** 角色基础生命上限 */
   get baseHp() { return this.runChar.hp }
+  /** 生命上限唯一算法：角色 + 装备 + 道具，再乘诅咒。散落多处会导致口径不一致 */
+  computeMaxHp() {
+    return Math.max(1, Math.round((this.baseHp + this.eq.maxHp + this.stats.maxHp) * this.curses.maxHpMul))
+  }
 
   // 角色 × 局内道具(stats) × 局外装备(eq) 三层叠加
   get spd() { return 72 * this.runChar.spdMul * this.stats.moveSpd * (1 + this.eq.spd / 100) }
   get magnetR() { return 28 * this.stats.magnet * (1 + this.eq.magnet / 100) }
-  get goldMul() { return this.stats.goldMul * (1 + this.eq.xp / 100) }
+  get goldMul() { return this.stats.goldMul * (1 + this.eq.xp / 100) * this.curses.goldMul }
   get regen() { return this.stats.regen + this.eq.regen }
   get critChance() { return 0.05 + this.stats.crit + this.eq.crit / 100 }
-  /** 伤害减免，上限 70% 防止无敌 */
-  get armorMul() { return 1 - Math.min(0.7, this.stats.armor + this.eq.armor / 100) }
+  /** 伤害减免（上限 70% 防止无敌），再乘上诅咒带来的受伤放大 */
+  get armorMul() { return (1 - Math.min(0.7, this.stats.armor + this.eq.armor / 100)) * this.curses.dmgTaken }
   /** 弹体颜色随已拾取词条变化，让 build 在视觉上可辨认 */
   get shotColor() {
     const s = this.stats
@@ -274,7 +297,7 @@ export class Game {
     const prevMax = this.stats.maxHp
     this.stats = computeStats(this.runItems)
     const gained = this.stats.maxHp - prevMax
-    this.maxHp = this.baseHp + this.eq.maxHp + this.stats.maxHp
+    this.maxHp = this.computeMaxHp()
     this.hp = Math.min(this.maxHp, this.hp + Math.max(0, gained))
   }
 
@@ -296,8 +319,12 @@ export class Game {
     this.runChar = getChar(this.profile.char)
     this.runItems = this.runChar.startItems.filter(id => ITEM_BY_ID.has(id))
     this.stats = computeStats(this.runItems)
+    this.runCurses = []
+    this.curses = baseCurses()
+    this.endless = false
+    this.winRecorded = false
     this.fireT = 0; this.orbAng = 0; this.boltT = 0
-    this.maxHp = this.baseHp + this.eq.maxHp + this.stats.maxHp
+    this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
     this.runLoot = []; this.runGold = this.runChar.startGold
     this.dashT = 0; this.dashCd = 0; this.dashX = 0; this.dashY = 0; this.dashBuf = 0
@@ -379,6 +406,8 @@ export class Game {
       hp: this.hp,
       maxHp: this.maxHp,
       itemIds: this.runItems.slice(),
+      curseIds: this.runCurses.slice(),
+      endless: this.endless,
       activeId: this.active ? this.active.id : null,
       activeCharge: this.activeCharge,
       gold: this.runGold,
@@ -397,6 +426,7 @@ export class Game {
           x: p.x, y: p.y,
           itemId: p.item ? p.item.id : null,
           actId: p.act ? p.act.id : null,
+          curseId: p.curse ? p.curse.id : null,
           price: p.price, kind: p.kind, taken: p.taken,
         }))] as [string, any[]]),
     }
@@ -410,11 +440,14 @@ export class Game {
     this.depth = s.depth
     this.runItems = s.itemIds.filter(id => ITEM_BY_ID.has(id)) // 过滤掉版本变更后已删除的道具
     this.stats = computeStats(this.runItems)
+    this.runCurses = (s.curseIds || []).filter(id => CURSE_BY_ID.has(id))
+    this.curses = computeCurses(this.runCurses)
+    this.endless = !!s.endless
     // 生命上限按「当前装备 + 本局道具」重算，而不是直接信存档里的数字：
     // 玩家可能在家园换过装备，直接沿用会和其他属性口径不一致。
     // 但只抬上限不回血，避免"退出换装再进来"变成回血手段。
     this.runChar = getChar(s.charId)
-    this.maxHp = this.baseHp + this.eq.maxHp + this.stats.maxHp
+    this.maxHp = this.computeMaxHp()
     this.hp = clamp(s.hp, 1, this.maxHp)
     this.active = s.activeId ? (ACTIVE_BY_ID.get(s.activeId) ?? null) : null
     this.activeCharge = s.activeCharge
@@ -445,6 +478,7 @@ export class Game {
         x: p.x, y: p.y,
         item: p.itemId ? (ITEM_BY_ID.get(p.itemId) ?? null) : null,
         act: p.actId ? (ACTIVE_BY_ID.get(p.actId) ?? null) : null,
+        curse: p.curseId ? (CURSE_BY_ID.get(p.curseId) ?? null) : null,
         price: p.price, kind: p.kind as Pedestal['kind'], taken: p.taken,
       })))
     }
@@ -624,7 +658,7 @@ export class Game {
     }
 
     // 普通房：按层数堆量，随机兵种组合
-    const n = clamp(2 + Math.floor(this.depth * 1.2) + Math.floor(rand(0, 3)), 2, 10)
+    const n = clamp(Math.round((2 + Math.floor(this.depth * 1.2) + Math.floor(rand(0, 3))) * this.curses.enemyCount), 2, 16)
     // 兵种随层数解锁，让每层的战斗感觉不同
     const kinds: EnemyKind[] =
       this.depth >= 4 ? ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner']
@@ -666,7 +700,7 @@ export class Game {
       // 商店：3 件明码标价，让局内金币有真实用途
       return [0, 1, 2].map(i => {
         const item = rollRunItem(luck)
-        const price = [28, 45, 70][item.tier] + this.depth * 6
+        const price = Math.round(([28, 45, 70][item.tier] + this.depth * 6) * this.curses.shopMul)
         return { x: ROOM_W / 2 + (i - 1) * 110, y: cy, item, act: null, price, kind: 'gold' as const, taken: false }
       })
     }
@@ -676,6 +710,17 @@ export class Game {
         const item = rollRunItem(luck + 45)
         return { x: ROOM_W / 2 + (i === 0 ? -80 : 80), y: cy, item, act: null, price: 22 + this.depth * 3, kind: 'hp' as const, taken: false }
       })
+    }
+    // 普通房有概率出现诅咒祭坛：接受一条永久诅咒，换一件高稀有度道具
+    if (r.type === 'normal' && chance(0.2)) {
+      const curse = rollCurse(this.runCurses)
+      if (curse) {
+        return [{
+          x: ROOM_W / 2, y: cy,
+          item: rollRunItem(luck + 70), act: null,
+          price: 0, kind: 'curse' as const, taken: false, curse,
+        }]
+      }
     }
     return []
   }
@@ -696,12 +741,13 @@ export class Game {
       }
     }
     if (r.type === 'boss') {
-      if (this.depth >= FINAL_DEPTH) {
-        // 最终层 Boss 倒下 = 通关
+      if (this.depth >= FINAL_DEPTH && !this.endless) {
+        // 最终层 Boss 倒下：先入档通关，再让玩家选择收手还是继续深入
         this.float(ROOM_W / 2, ROOM_H / 2 - 40, '深渊已被净化！', '#ffd75e', 14)
         this.burst(ROOM_W / 2, ROOM_H / 2, '#ffd75e', 60)
         this.hitStop = 0.3
-        this.endRun(true)
+        this.state = 'victory'
+        this.recordWin()
       } else {
         this.trapdoor = { x: ROOM_W / 2, y: ROOM_H / 2 }
         this.float(ROOM_W / 2, ROOM_H / 2 - 40, '地板裂开了……', '#ffd75e', 10)
@@ -787,6 +833,9 @@ export class Game {
       case 'charselect':
         this.updateCharSelect()
         break
+      case 'victory':
+        this.updateVictory()
+        break
       case 'play':
         if (Input.pressed('p') || Input.pressed('escape')) { this.state = 'pause'; break }
         this.updatePlay(dt)
@@ -854,9 +903,14 @@ export class Game {
     this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
     this.hitStop = 0; this.hurtFlash = 0; this.invuln = 0
     this.parts = []; this.floats = []
+    // 家园不是一局游戏：清掉上一局残留的道具/诅咒，否则血量预览会算错
+    this.runItems = []
+    this.stats = baseStats()
+    this.runCurses = []
+    this.curses = baseCurses()
     // 家园里预览当前选中角色的血量
     this.runChar = getChar(this.profile.char)
-    this.hp = this.maxHp = this.baseHp + this.eq.maxHp
+    this.hp = this.maxHp = this.computeMaxHp()
   }
 
   hubSay(msg: string) { this.hubMsg = msg; this.hubMsgT = 2.2 }
@@ -991,6 +1045,25 @@ export class Game {
       if (p.taken) continue
       if (dist2(p.x, p.y, this.px, this.py) >= 13 * 13) continue
 
+      // 诅咒祭坛：房间清空前不可用，避免边打边白嫖
+      if (p.kind === 'curse') {
+        if (!this.room.cleared) {
+          if (this.frameT % 0.5 < 0.02) this.float(p.x, p.y - 30, '清空房间后才能献祭', '#9aa4c8', 8)
+          continue
+        }
+        if (p.curse) {
+          this.runCurses.push(p.curse.id)
+          this.curses = computeCurses(this.runCurses)
+          // 虚弱之咒会压低上限，当前血量要跟着收敛
+          this.maxHp = this.computeMaxHp()
+          this.hp = Math.min(this.hp, this.maxHp)
+          this.float(p.x, p.y - 40, `诅咒：${p.curse.name}`, p.curse.color, 11)
+          this.float(p.x, p.y - 52, p.curse.desc, '#ff6b6b', 8)
+          this.shake = 0.7
+          this.hurtFlash = 0.6
+          sfx.boss()
+        }
+      }
       // 付费判定：付不起就提示，不消耗
       if (p.kind === 'gold') {
         if (this.runGold < p.price) {
@@ -1117,14 +1190,9 @@ export class Game {
     best.depth = Math.max(best.depth || 0, this.depth)
     best.time = Math.max(best.time, time)
     best.kills = Math.max(best.kills, this.kills)
-    if (win) best.wins++
+    // 通关的 wins 与奖励统一由 recordWin 处理，这里只兜底「没走过 victory 流程」的情况
+    if (win) this.recordWin()
     this.profile.runs++
-    // 通关奖励：大额金币 + 保底一件高稀有度装备，让"打穿"值得反复挑战
-    if (win) {
-      this.runGold += 400
-      this.runLoot.push(rollItem(this.profile.uidSeq++, 100, 3))
-      this.runLoot.push(rollItem(this.profile.uidSeq++, 60))
-    }
     // 战利品带回家：即使阵亡也保留，保证每次出门都有收获
     this.profile.gold += this.runGold
     this.lootLost = 0
@@ -1324,6 +1392,8 @@ export class Game {
         }
       }
 
+      // 诅咒使全体敌人提速
+      spd *= this.curses.enemySpd
       // 寒霜减速（时停已在 AI 前提早 continue，这里只处理单体减速）
       if (e.slow > 0) {
         e.slow -= dt
@@ -1715,6 +1785,93 @@ export class Game {
         c.spawnScale = 0.6
       }
     }
+  }
+
+  /** 通关记账。与 endRun 分开：无尽模式下要先记通关，再让玩家继续打 */
+  recordWin() {
+    if (this.winRecorded) return
+    this.winRecorded = true
+    const b = this.profile.best
+    b.wins++
+    b.depth = Math.max(b.depth || 0, this.depth)
+    this.profile.gold += 400
+    if (this.profile.inv.length < INV_CAP) this.profile.inv.push(rollItem(this.profile.uidSeq++, 100, 3))
+    if (this.profile.inv.length < INV_CAP) this.profile.inv.push(rollItem(this.profile.uidSeq++, 60))
+    saveProfile(this.profile)
+    sfx.win()
+  }
+
+  /** 通关后的抉择：收手回家 / 继续深入 */
+  updateVictory() {
+    const rects = this.victoryRects()
+    if (!Input.mclick && !Input.pressed('1') && !Input.pressed('2')) return
+    let sel = -1
+    if (Input.pressed('1')) sel = 0
+    if (Input.pressed('2')) sel = 1
+    if (Input.mclick) {
+      for (let i = 0; i < rects.length; i++) {
+        const r = rects[i]
+        if (Input.mx >= r.x && Input.mx <= r.x + r.w && Input.my >= r.y && Input.my <= r.y + r.h) sel = i
+      }
+    }
+    if (sel === 0) {
+      // 收手：正常结算带战利品回家
+      this.state = 'play'
+      this.endRun(true)
+    } else if (sel === 1) {
+      // 继续深入：进入无尽模式，此后不再有通关判定，死了才结束
+      this.endless = true
+      this.state = 'play'
+      this.nextFloor()
+      this.float(this.px, this.py - 44, '进入无尽深渊……', '#b98cff', 12)
+    }
+  }
+
+  victoryRects() {
+    const w = 190, h = 74, gap = 20
+    const x0 = (VW - (w * 2 + gap)) / 2
+    const y = VH * 0.56
+    return [0, 1].map(i => ({ x: x0 + i * (w + gap), y, w, h }))
+  }
+
+  drawVictory() {
+    const g = this.g
+    g.fillStyle = 'rgba(7,7,13,0.9)'
+    g.fillRect(0, 0, VW, VH)
+    g.textAlign = 'center'
+    g.font = 'bold 24px monospace'
+    g.fillStyle = '#ffd75e'
+    g.fillText('通 关 ！', VW / 2, VH * 0.24)
+    g.font = '10px monospace'
+    g.fillStyle = '#9aa4c8'
+    g.fillText(`你打穿了 ${FINAL_DEPTH} 层深渊 · 用时 ${fmtTime(this.t)} · 击杀 ${this.kills}`, VW / 2, VH * 0.32)
+    g.fillStyle = '#57e6a0'
+    g.fillText('通关奖励已入账：400 金币 + 2 件装备', VW / 2, VH * 0.40)
+
+    const rects = this.victoryRects()
+    const opts = [
+      { t: '带着战利品回家', d: '结算本局，安全落袋', c: '#57e6a0', k: '[ 1 ]' },
+      { t: '继续深入', d: '无尽模式，死亡才结束', c: '#b98cff', k: '[ 2 ]' },
+    ]
+    opts.forEach((o, i) => {
+      const r = rects[i]
+      const hover = Input.mx >= r.x && Input.mx <= r.x + r.w && Input.my >= r.y && Input.my <= r.y + r.h
+      g.fillStyle = hover ? '#232743' : '#171a2e'
+      g.fillRect(r.x, r.y, r.w, r.h)
+      g.strokeStyle = hover ? o.c : '#3a3f66'
+      g.lineWidth = hover ? 2 : 1
+      g.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1)
+      g.lineWidth = 1
+      g.font = 'bold 11px monospace'
+      g.fillStyle = o.c
+      g.fillText(o.t, r.x + r.w / 2, r.y + 26)
+      g.font = '8px monospace'
+      g.fillStyle = '#9aa4c8'
+      g.fillText(o.d, r.x + r.w / 2, r.y + 44)
+      g.font = '8px monospace'
+      g.fillStyle = '#5c6285'
+      g.fillText(o.k, r.x + r.w / 2, r.y + 62)
+    })
   }
 
   /** Boss 招式：每只一套，让每层的「期末考试」不重样 */
@@ -2111,7 +2268,7 @@ export class Game {
       if (owned) {
         this.profile.char = c.id
         this.runChar = c
-        this.hp = this.maxHp = this.baseHp + this.eq.maxHp
+        this.hp = this.maxHp = this.computeMaxHp()
         saveProfile(this.profile)
         sfx.pickup()
       } else if (this.profile.gold >= c.cost) {
@@ -2119,7 +2276,7 @@ export class Game {
         this.profile.chars.push(c.id)
         this.profile.char = c.id
         this.runChar = c
-        this.hp = this.maxHp = this.baseHp + this.eq.maxHp
+        this.hp = this.maxHp = this.computeMaxHp()
         saveProfile(this.profile)
         sfx.levelup()
       } else {
@@ -2325,11 +2482,20 @@ export class Game {
       const col = ped.item ? ped.item.color : ped.act!.color
       const name = ped.item ? ped.item.name : ped.act!.name
       const desc = ped.item ? ped.item.desc : ped.act!.desc
-      // 台座
-      g.fillStyle = '#3a3f66'
-      g.fillRect(Math.round(W(ped.x) - 7), Math.round(H(ped.y) + 2), 14, 6)
-      g.fillStyle = '#5c6285'
-      g.fillRect(Math.round(W(ped.x) - 9), Math.round(H(ped.y) + 7), 18, 3)
+      // 台座：诅咒祭坛画成暗色方尖碑，和普通道具台明确区分
+      if (ped.kind === 'curse') {
+        g.fillStyle = '#1a1020'
+        g.fillRect(Math.round(W(ped.x) - 6), Math.round(H(ped.y) - 4), 12, 14)
+        g.fillStyle = '#3a2440'
+        g.fillRect(Math.round(W(ped.x) - 10), Math.round(H(ped.y) + 8), 20, 4)
+        g.strokeStyle = ped.curse?.color || '#b98cff'
+        g.strokeRect(Math.round(W(ped.x) - 6) + 0.5, Math.round(H(ped.y) - 4) + 0.5, 11, 13)
+      } else {
+        g.fillStyle = '#3a3f66'
+        g.fillRect(Math.round(W(ped.x) - 7), Math.round(H(ped.y) + 2), 14, 6)
+        g.fillStyle = '#5c6285'
+        g.fillRect(Math.round(W(ped.x) - 9), Math.round(H(ped.y) + 7), 18, 3)
+      }
       // 悬浮图标（主动技能多一圈光晕以示区别）
       this.glow(W(ped.x), H(ped.y) - 6 + bob, ped.act ? 24 : 18, col, 0.6)
       const icon = ped.item ? this.itemIcon(ped.item) : this.actIcon(ped.act!)
@@ -2352,6 +2518,17 @@ export class Game {
         g.font = 'bold 9px monospace'
         g.fillStyle = '#ff4f6b'
         g.fillText(`${ped.price} 生命`, W(ped.x), H(ped.y) + 34)
+      } else if (ped.kind === 'curse' && ped.curse) {
+        g.font = 'bold 9px monospace'
+        g.fillStyle = ped.curse.color
+        g.fillText(`代价：${ped.curse.name}`, W(ped.x), H(ped.y) + 34)
+        g.font = '7px monospace'
+        g.fillStyle = '#ff6b6b'
+        g.fillText(ped.curse.desc, W(ped.x), H(ped.y) + 44)
+        if (!this.room.cleared) {
+          g.fillStyle = '#5c6285'
+          g.fillText('清空房间后可献祭', W(ped.x), H(ped.y) + 54)
+        }
       }
       if (ped.act) {
         g.font = '7px monospace'
@@ -2571,6 +2748,7 @@ export class Game {
     this.drawHud()
 
     if (this.state === 'pause') this.drawPause()
+    if (this.state === 'victory') this.drawVictory()
     if (this.state === 'end') this.drawEnd()
   }
 
@@ -2665,10 +2843,11 @@ export class Game {
       }
     }
 
-    // 暗角
-    const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.4, VW / 2, VH / 2, VH * 0.95)
+    // 暗角。黑暗之咒会显著收紧可视范围
+    const vis = this.curses.vision
+    const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.4 * vis, VW / 2, VH / 2, VH * 0.95 * vis)
     vg.addColorStop(0, 'rgba(0,0,0,0)')
-    vg.addColorStop(1, 'rgba(0,0,0,0.5)')
+    vg.addColorStop(1, vis < 1 ? 'rgba(0,0,0,0.92)' : 'rgba(0,0,0,0.5)')
     g.fillStyle = vg
     g.fillRect(0, 0, VW, VH)
 
@@ -2722,8 +2901,14 @@ export class Game {
     g.font = 'bold 10px monospace'
     g.textAlign = 'left'
     g.fillStyle = '#ffffff'
-    g.fillStyle = this.depth >= FINAL_DEPTH ? '#ff4f6b' : '#ffffff'
-    g.fillText(`第 ${this.depth} / ${FINAL_DEPTH} 层`, 4, 14)
+    g.fillStyle = this.endless ? '#b98cff' : this.depth >= FINAL_DEPTH ? '#ff4f6b' : '#ffffff'
+    g.fillText(this.endless ? `无尽 · 第 ${this.depth} 层` : `第 ${this.depth} / ${FINAL_DEPTH} 层`, 4, 14)
+    // 诅咒计数：接受过的诅咒是持续压力，必须常驻可见
+    if (this.runCurses.length) {
+      g.font = '8px monospace'
+      g.fillStyle = '#ff4f6b'
+      g.fillText(`诅咒 x${this.runCurses.length}`, 4, 38)
+    }
     const r = this.room
     if (r) {
       g.font = '8px monospace'
@@ -2855,17 +3040,107 @@ export class Game {
     if (line) g.fillText(line, cx, yy)
   }
 
+  /** 暂停面板：把整个 build 摊开给玩家看。之前完全没有查看自身属性的途径 */
   drawPause() {
     const g = this.g
-    g.fillStyle = 'rgba(7,7,13,0.6)'
+    const st = this.stats
+    g.fillStyle = 'rgba(7,7,13,0.92)'
     g.fillRect(0, 0, VW, VH)
     g.textAlign = 'center'
-    g.font = 'bold 16px monospace'
+    g.font = 'bold 15px monospace'
     g.fillStyle = '#ffffff'
-    g.fillText('已暂停', VW / 2, VH / 2 - 6)
-    g.font = '9px monospace'
+    g.fillText('已 暂 停', VW / 2, 30)
+    g.font = '8px monospace'
     g.fillStyle = '#9aa4c8'
-    g.fillText('按 P 或点击继续 · M 静音', VW / 2, VH / 2 + 14)
+    g.fillText('按 P 或点击继续 · M 静音', VW / 2, 44)
+
+    // 角色 + 层数
+    g.font = 'bold 10px monospace'
+    g.fillStyle = this.runChar.color
+    g.fillText(`${this.runChar.name} · 第 ${this.depth} 层${this.endless ? '（无尽）' : ` / ${FINAL_DEPTH}`}`, VW / 2, 62)
+
+    // ---- 左栏：核心属性 ----
+    const lx = 40
+    let ly = 88
+    g.textAlign = 'left'
+    g.font = 'bold 9px monospace'
+    g.fillStyle = '#ffd75e'
+    g.fillText('射击属性', lx, ly); ly += 14
+    g.font = '8px monospace'
+    g.fillStyle = '#ffffff'
+    const shotLines: string[] = [
+      `伤害倍率   ${st.dmg.toFixed(2)}x`,
+      `射速       ${(st.rate * 2).toFixed(1)} 发/秒`,
+      `弹数       ${1 + Math.floor(st.count)}`,
+      `弹速/射程  ${st.speed.toFixed(2)}x / ${st.range.toFixed(2)}x`,
+      `暴击率     ${Math.round(this.critChance * 100)}%`,
+    ]
+    if (st.pierce) shotLines.push(`穿透       ${st.pierce}`)
+    if (st.bounce) shotLines.push(`弹射       ${st.bounce}`)
+    if (st.homing) shotLines.push(`追踪       ${st.homing}`)
+    if (st.split) shotLines.push(`分裂       ${st.split}`)
+    if (st.explode) shotLines.push(`爆炸       ${st.explode.toFixed(1)}x`)
+    if (st.chain) shotLines.push(`闪电链     ${st.chain}`)
+    if (st.burn) shotLines.push(`点燃       ${st.burn} 层`)
+    if (st.freeze) shotLines.push(`冰冻       ${Math.round(st.freeze * 100)}%`)
+    if (st.vamp) shotLines.push(`吸血       ${Math.round(st.vamp * 100)}%`)
+    for (const l of shotLines) { g.fillText(l, lx, ly); ly += 11 }
+
+    // ---- 中栏：生存与常驻 ----
+    const mx = VW / 2 - 40
+    let my = 88
+    g.font = 'bold 9px monospace'
+    g.fillStyle = '#57e6a0'
+    g.fillText('生存 / 常驻', mx, my); my += 14
+    g.font = '8px monospace'
+    g.fillStyle = '#ffffff'
+    const survLines: string[] = [
+      `生命       ${Math.ceil(this.hp)} / ${this.maxHp}`,
+      `受伤倍率   ${this.armorMul.toFixed(2)}x`,
+      `移速       ${Math.round(this.spd)} `,
+      `金币倍率   ${this.goldMul.toFixed(2)}x`,
+    ]
+    if (this.regen) survLines.push(`每秒回复   ${this.regen.toFixed(1)}`)
+    if (st.orbit) survLines.push(`环绕法球   ${st.orbit}`)
+    if (st.aura) survLines.push(`光环伤害   ${st.aura}`)
+    if (st.bolt) survLines.push(`落雷       ${st.bolt.toFixed(1)}/秒`)
+    for (const l of survLines) { g.fillText(l, mx, my); my += 11 }
+    if (this.active) {
+      my += 4
+      g.fillStyle = this.active.color
+      g.fillText(`主动 ${this.active.name} ${this.activeCharge}/${this.active.charge}`, mx, my)
+    }
+
+    // ---- 右栏：道具与诅咒 ----
+    const rx = VW - 190
+    let ry = 88
+    g.font = 'bold 9px monospace'
+    g.fillStyle = '#57c7ff'
+    g.fillText(`已拾取道具 (${this.runItems.length})`, rx, ry); ry += 14
+    const counts = new Map<string, number>()
+    for (const id of this.runItems) counts.set(id, (counts.get(id) || 0) + 1)
+    g.font = '8px monospace'
+    for (const [id, n] of counts) {
+      if (ry > VH - 60) { g.fillStyle = '#5c6285'; g.fillText('…', rx, ry); break }
+      const it = ITEM_BY_ID.get(id)
+      if (!it) continue
+      g.fillStyle = it.color
+      g.fillText(`${it.name}${n > 1 ? ` x${n}` : ''}`, rx, ry)
+      ry += 11
+    }
+    if (this.runCurses.length) {
+      ry += 6
+      g.font = 'bold 9px monospace'
+      g.fillStyle = '#ff4f6b'
+      g.fillText(`已接受诅咒 (${this.runCurses.length})`, rx, ry); ry += 13
+      g.font = '8px monospace'
+      for (const id of this.runCurses) {
+        const c = CURSE_BY_ID.get(id)
+        if (!c) continue
+        g.fillStyle = c.color
+        g.fillText(c.name, rx, ry); ry += 11
+      }
+    }
   }
 
   drawEnd() {
