@@ -4,10 +4,10 @@ import { Input } from './input'
 import { sfx, toggleMute, isMuted } from './audio'
 import { clamp, rand, pick, chance, dist2, fmtTime } from './util'
 import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, fmtMod, fmtStat, StatKey } from './items'
-import { Profile, loadProfile, saveProfile, INV_CAP } from './save'
+import { Profile, loadProfile, saveProfile, INV_CAP, RunSave, RUN_SAVE_VER, saveRun, loadRun, clearRun } from './save'
 import { Floor, RoomDef, Dir, DIRS, DIR_LIST, genFloor, rkey, hasDoor } from './rooms'
 import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
-import { RunStats, RunItem, ActiveItem, baseStats, computeStats, rollRunItem, rollActive, ITEM_BY_ID } from './runitems'
+import { RunStats, RunItem, ActiveItem, baseStats, computeStats, rollRunItem, rollActive, ITEM_BY_ID, ACTIVE_BY_ID } from './runitems'
 import { makeEmblem } from './sprites'
 
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
@@ -184,6 +184,8 @@ export class Game {
   cloneFire = 0
   /** 全场冻结剩余时间 */
   freezeAll = 0
+  /** 家园里检测到的未完成存档 */
+  pendingRun: RunSave | null = loadRun()
   /** Boss 被击败后出现的通往下一层的地板洞 */
   trapdoor: { x: number; y: number } | null = null
   roomFlash = 0 // 进房过渡
@@ -330,6 +332,110 @@ export class Game {
     let peds = this.roomPeds.get(key)
     if (!peds) { peds = this.makePedestals(r); this.roomPeds.set(key, peds) }
     this.pedestals = peds
+
+    // 每进一间房存一次档
+    this.snapshotRun()
+  }
+
+  // ================================================================
+  // 局内存档：按房间粒度快照
+  // ================================================================
+  /** 进房时存档。存 id 不存对象，否则 apply() 会在序列化中丢失 */
+  snapshotRun() {
+    const snap: RunSave = {
+      v: RUN_SAVE_VER,
+      depth: this.depth,
+      curKey: this.curKey,
+      startKey: this.floor.startKey,
+      bossKey: this.floor.bossKey,
+      hp: this.hp,
+      maxHp: this.maxHp,
+      itemIds: this.runItems.slice(),
+      activeId: this.active ? this.active.id : null,
+      activeCharge: this.activeCharge,
+      gold: this.runGold,
+      loot: this.runLoot.slice(),
+      t: this.t,
+      kills: this.kills,
+      rooms: [...this.floor.rooms.values()].map(r => ({
+        gx: r.gx, gy: r.gy, type: r.type,
+        cleared: r.cleared, visited: r.visited, seed: r.seed,
+        spawned: r.spawned, looted: r.looted,
+      })),
+      obs: [...this.roomObs.entries()].map(([k, list]) =>
+        [k, list.map(o => ({ col: o.col, row: o.row, kind: o.kind, hp: o.hp, maxHp: o.maxHp }))] as [string, any[]]),
+      peds: [...this.roomPeds.entries()].map(([k, list]) =>
+        [k, list.map(p => ({
+          x: p.x, y: p.y,
+          itemId: p.item ? p.item.id : null,
+          actId: p.act ? p.act.id : null,
+          price: p.price, kind: p.kind, taken: p.taken,
+        }))] as [string, any[]]),
+    }
+    saveRun(snap)
+    // uidSeq 只在 endRun 才落盘，中途退出会回退导致装备 uid 重复，这里一并持久化
+    saveProfile(this.profile)
+  }
+
+  /** 从存档恢复。当前房间的怪会重新生成，最多损失一个房间的进度 */
+  restoreRun(s: RunSave) {
+    this.depth = s.depth
+    this.runItems = s.itemIds.filter(id => ITEM_BY_ID.has(id)) // 过滤掉版本变更后已删除的道具
+    this.stats = computeStats(this.runItems)
+    // 生命上限按「当前装备 + 本局道具」重算，而不是直接信存档里的数字：
+    // 玩家可能在家园换过装备，直接沿用会和其他属性口径不一致。
+    // 但只抬上限不回血，避免"退出换装再进来"变成回血手段。
+    this.maxHp = 100 + this.eq.maxHp + this.stats.maxHp
+    this.hp = clamp(s.hp, 1, this.maxHp)
+    this.active = s.activeId ? (ACTIVE_BY_ID.get(s.activeId) ?? null) : null
+    this.activeCharge = s.activeCharge
+    this.runGold = s.gold
+    this.runLoot = s.loot || []
+    this.t = s.t
+    this.kills = s.kills
+
+    // 还原楼层
+    const rooms = new Map<string, RoomDef>()
+    for (const r of s.rooms) {
+      rooms.set(rkey(r.gx, r.gy), {
+        gx: r.gx, gy: r.gy, type: r.type as RoomDef['type'],
+        cleared: r.cleared, visited: r.visited, seed: r.seed,
+        spawned: r.spawned, looted: r.looted,
+      })
+    }
+    this.floor = { rooms, startKey: s.startKey, bossKey: s.bossKey, depth: s.depth }
+
+    // 还原地形与道具台
+    this.roomObs.clear()
+    for (const [k, list] of s.obs || []) {
+      this.roomObs.set(k, list.map(o => ({ col: o.col, row: o.row, kind: o.kind as ObKind, hp: o.hp, maxHp: o.maxHp, flash: 0 })))
+    }
+    this.roomPeds.clear()
+    for (const [k, list] of s.peds || []) {
+      this.roomPeds.set(k, list.map(p => ({
+        x: p.x, y: p.y,
+        item: p.itemId ? (ITEM_BY_ID.get(p.itemId) ?? null) : null,
+        act: p.actId ? (ACTIVE_BY_ID.get(p.actId) ?? null) : null,
+        price: p.price, kind: p.kind as Pedestal['kind'], taken: p.taken,
+      })))
+    }
+
+    // 重置瞬时状态
+    this.shake = 0; this.invuln = 0; this.hitStop = 0; this.hurtFlash = 0
+    this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
+    this.fireT = 0; this.orbAng = 0; this.boltT = 0
+    this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0
+    this.eid = 1
+    this.win = false; this.newRecord = false
+    this.enemies = []; this.shots = []; this.eprojs = []; this.gems = []; this.hearts = []
+    this.chests = []; this.novas = []; this.bolts = []; this.parts = []; this.floats = []
+
+    // 回到存档所在房间；若该房未清空，怪会重新刷一遍
+    const target = rooms.has(s.curKey) ? s.curKey : s.startKey
+    const r = rooms.get(target)!
+    if (!r.cleared) r.spawned = false
+    this.enterRoom(target, null)
+    this.float(this.px, this.py - 30, `继续第 ${this.depth} 层`, '#57e6a0', 11)
   }
 
   // ---------- 地形 ----------
@@ -727,7 +833,14 @@ export class Game {
     if (Input.pressed('i')) { this.state = 'inventory'; return }
     if (Input.pressed('e')) {
       if (nearPortal) {
-        this.reset()
+        // 有未完成的存档就接着打，否则开新的一局
+        if (this.pendingRun) {
+          const s = this.pendingRun
+          this.pendingRun = null
+          this.restoreRun(s)
+        } else {
+          this.reset()
+        }
         this.state = 'play'
         sfx.boss()
       } else if (nearStash) {
@@ -938,6 +1051,9 @@ export class Game {
     this.win = win
     this.state = 'end'
     this.hitStop = 0
+    // 一局结束就清档：不清的话玩家可以在快死时关页面读档重来，roguelite 就废了
+    clearRun()
+    this.pendingRun = null
     const time = Math.floor(this.t)
     const best = this.profile.best
     // 房间制下「深度」才是成绩，破纪录以此为准
@@ -2679,7 +2795,9 @@ export class Game {
     const nearPortal = dist2(this.px, this.py, PORTAL.x, PORTAL.y) < 26 * 26
     const nearStash = dist2(this.px, this.py, STASH.x, STASH.y) < 24 * 24
     const nearForge = dist2(this.px, this.py, FORGE.x, FORGE.y) < 24 * 24
-    label(PORTAL.x, PORTAL.y - 26, '传送门 · 出发冒险', nearPortal, '#b98cff')
+    label(PORTAL.x, PORTAL.y - 26,
+      this.pendingRun ? `传送门 · 继续第 ${this.pendingRun.depth} 层` : '传送门 · 出发冒险',
+      nearPortal, this.pendingRun ? '#57e6a0' : '#b98cff')
     label(STASH.x, STASH.y - 18, '储物箱 · 背包', nearStash, '#57c7ff')
     label(FORGE.x, FORGE.y - 18, `熔炉 · 锻造(${FORGE_COST}金)`, nearForge, '#ff9f4f')
 

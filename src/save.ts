@@ -52,3 +52,66 @@ export function loadProfile(): Profile {
 export function saveProfile(p: Profile) {
   try { localStorage.setItem(KEY, JSON.stringify(p)) } catch { /* 隐私模式下忽略 */ }
 }
+
+// ================================================================
+// 局内存档：中途退出后可以接着打
+// ================================================================
+// 关键约束：只存 id 不存对象引用。道具/主动技能带 apply() 函数，
+// JSON 序列化会把函数丢掉，读回来就是个空壳，必须靠 id 重新查表还原。
+
+const RUN_KEY = 'pxsurv-run'
+const RUN_VER = 1
+
+export interface SavedRoom {
+  gx: number; gy: number; type: string
+  cleared: boolean; visited: boolean; seed: number
+  spawned: boolean; looted: boolean
+}
+export interface SavedOb { col: number; row: number; kind: string; hp: number; maxHp: number }
+export interface SavedPed {
+  x: number; y: number
+  itemId: string | null; actId: string | null
+  price: number; kind: string; taken: boolean
+}
+
+export interface RunSave {
+  v: number
+  depth: number
+  curKey: string
+  startKey: string
+  bossKey: string
+  hp: number
+  maxHp: number
+  itemIds: string[]
+  activeId: string | null
+  activeCharge: number
+  gold: number
+  loot: Item[]
+  t: number
+  kills: number
+  rooms: SavedRoom[]
+  obs: [string, SavedOb[]][]
+  peds: [string, SavedPed[]][]
+}
+
+export function saveRun(r: RunSave) {
+  try { localStorage.setItem(RUN_KEY, JSON.stringify(r)) } catch { /* 忽略 */ }
+}
+
+export function loadRun(): RunSave | null {
+  try {
+    const raw = localStorage.getItem(RUN_KEY)
+    if (!raw) return null
+    const r = JSON.parse(raw) as RunSave
+    // 版本不符说明存档结构已变，直接丢弃好过读出一个半残的局
+    if (!r || r.v !== RUN_VER || !Array.isArray(r.rooms) || !r.rooms.length) { clearRun(); return null }
+    return r
+  } catch { clearRun(); return null }
+}
+
+/** 阵亡与通关都要清档，否则玩家可以在快死时关页面读档重来 */
+export function clearRun() {
+  try { localStorage.removeItem(RUN_KEY) } catch { /* 忽略 */ }
+}
+
+export const RUN_SAVE_VER = RUN_VER
