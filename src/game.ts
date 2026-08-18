@@ -24,10 +24,11 @@ import {
   OBX, OBY, CROSS_COL, CROSS_ROW, ROOM_MOOD,
   HUB, PORTAL, STASH, FORGE, STATUE, FORGE_COST,
   FINAL_DEPTH, BOSSES, BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_BASE,
+  CHAMPS, CHAMP_BY_ID,
 } from './consts'
 import type {
   ObKind, Ob, State, EnemyKind, BossId, BossDef, Enemy, Shot, EProj,
-  Gem, Heart, Particle, FloatText, Nova, Bolt, Chest, Pedestal,
+  Gem, Heart, Particle, FloatText, Nova, Bolt, Chest, Pedestal, ChampMod,
 } from './consts'
 
 // main.ts 依赖这两个尺寸，从这里转出去，避免改动调用方
@@ -616,7 +617,9 @@ export class Game {
         if (!this.blockedAt(x, y)) break
         if (k === 11) { x = ROOM_W / 2; y = ROOM_H / 2 }
       }
-      this.spawnEnemyAt(pick(kinds), x, y)
+      const e = this.spawnEnemyAt(pick(kinds), x, y)
+      // 精英变体：出现率随层数上升，让后期每间房都可能有硬点
+      if (chance(Math.min(0.3, 0.05 + this.depth * 0.035))) this.makeChampion(e)
     }
     // 精英作为「房间挑战」偶发出现
     if (this.depth >= 2 && chance(0.18)) {
@@ -1238,6 +1241,7 @@ export class Game {
       burn: 0, burnT: 0,
       bossId: null,
       enraged: false,
+      champ: null,
       atkT: rand(1.5, 3),
       dashT: 0, dashCd: rand(1, 2.5), dashDx: 0, dashDy: 0,
       chargeT: 0, chargeCd: rand(2, 4), chargeAng: 0,
@@ -1785,6 +1789,8 @@ export class Game {
   damage(e: Enemy, dmg: number, canCrit = true) {
     if (e.dead) return
     let d = dmg
+    // 护盾变体：硬性减伤，逼玩家换目标或堆伤害
+    if (e.champ === 'shielded') d *= 0.55
     const crit = canCrit && chance(this.critChance)
     if (crit) d *= 2
     e.hp -= d
@@ -1849,6 +1855,25 @@ export class Game {
     } else {
       this.gems.push({ x: e.x, y: e.y, val: e.xp, vx: 0, vy: 0 })
       if (chance(e.kind === 'skel' ? 0.05 : 0.02)) this.hearts.push({ x: e.x, y: e.y })
+    }
+    // 精英变体的额外结算：易爆怪炸一圈，其余给额外金币与掉落
+    if (e.champ) {
+      const cd = CHAMP_BY_ID.get(e.champ)!
+      this.runGold += 6 + this.depth * 2
+      this.burst(e.x, e.y, cd.color, 18)
+      if (e.champ === 'volatile') {
+        this.novas.push({ x: e.x, y: e.y, r: 5, maxR: 52, dmg: e.dmg * 0.9, hit: new Set() })
+        this.shake = 0.45
+        sfx.boom()
+        // 死亡爆炸也要能打到玩家，否则「易爆」没有威胁
+        if (this.invuln <= 0 && dist2(e.x, e.y, this.px, this.py) < 52 * 52) {
+          this.hp -= e.dmg * 0.9 * this.armorMul
+          this.invuln = 0.8
+          this.hurtFlash = 1
+          sfx.hurt()
+        }
+      }
+      if (chance(0.14)) this.dropLoot(e.x, e.y, 1, 12)
     }
     // 分裂史莱姆：裂成两只更小的
     if (e.kind === 'slime' && e.splits > 0) {
@@ -1995,6 +2020,18 @@ export class Game {
     }
   }
 
+  /** 把一只普通怪升格为精英变体 */
+  makeChampion(e: Enemy, mod?: ChampMod) {
+    const def = mod ? CHAMP_BY_ID.get(mod)! : pick(CHAMPS)
+    e.champ = def.id
+    e.hp = e.maxHp = e.maxHp * def.hpMul
+    e.spd *= def.spdMul
+    e.dmg *= def.dmgMul
+    e.scale *= def.scaleMul
+    e.r *= def.scaleMul
+    return e
+  }
+
   /** 自爆怪引爆：范围伤害同时打到玩家和其他敌人 */
   bomberExplode(e: Enemy) {
     const r = 46
@@ -2035,6 +2072,11 @@ export class Game {
     if (hit) {
       const h = hit as Enemy
       this.hp -= h.dmg * this.armorMul
+      // 嗜血变体：碰到玩家会自我回复，拖得越久越难打
+      if (h.champ === 'vampiric') {
+        h.hp = Math.min(h.maxHp, h.hp + h.maxHp * 0.15)
+        this.float(h.x, h.y - 14, '吸取！', '#b13e53', 8)
+      }
       this.invuln = 0.8
       this.shake = 0.5
       this.hurtFlash = 1
@@ -2465,6 +2507,17 @@ export class Game {
       const iw = (img as any).width * drawScale
       const ih = (img as any).height * drawScale
       this.shadow(W(e.x), H(e.y) + ih / 2 - 2, iw * 0.35)
+      // 精英变体：脚下光环 + 词缀色，让「这只不一样」一眼看出来
+      const champDef = e.champ && !e.dead ? CHAMP_BY_ID.get(e.champ) : undefined
+      if (champDef) {
+        const pr = e.r * e.scale + 5 + Math.sin(this.frameT * 4 + e.id) * 1.5
+        this.glow(W(e.x), H(e.y) + ih / 2 - 3, pr * 1.6, champDef.color, 0.4)
+        g.strokeStyle = champDef.color
+        g.lineWidth = 1
+        g.beginPath()
+        g.ellipse(W(e.x), H(e.y) + ih / 2 - 3, pr, pr * 0.4, 0, 0, Math.PI * 2)
+        g.stroke()
+      }
       if (e.dead) g.filter = 'brightness(5) saturate(0)'
       else if (e.flash > 0) g.filter = 'brightness(4) saturate(0.5)'
       // 自爆怪引信期间剧烈闪烁警示
@@ -2489,14 +2542,21 @@ export class Game {
           g.lineWidth = e.kind === 'boss' ? 3 : 2
           g.beginPath(); g.arc(W(e.x), H(e.y), e.r * e.scale + 4 + (e.kind === 'boss' ? 4 : 0), 0, Math.PI * 2); g.stroke()
         }
-        // 精英/Boss 血条
-        if (e.kind === 'elite' || e.kind === 'boss') {
-          const bw = e.kind === 'boss' ? 40 : 24
+        // 精英/Boss/变体 血条
+        if (e.kind === 'elite' || e.kind === 'boss' || e.champ) {
+          const bw = e.kind === 'boss' ? 40 : e.champ && e.kind !== 'elite' ? 18 : 24
           const by = H(e.y) - ih / 2 - 5
           g.fillStyle = '#26233a'
           g.fillRect(W(e.x) - bw / 2, by, bw, 3)
-          g.fillStyle = '#ff4f6b'
+          g.fillStyle = champDef ? champDef.color : '#ff4f6b'
           g.fillRect(W(e.x) - bw / 2, by, bw * clamp(e.hp / e.maxHp, 0, 1), 3)
+          // 词缀名，让玩家知道这只强在哪
+          if (champDef) {
+            g.font = '6px monospace'
+            g.textAlign = 'center'
+            g.fillStyle = champDef.color
+            g.fillText(champDef.name, W(e.x), by - 3)
+          }
         }
       }
     }

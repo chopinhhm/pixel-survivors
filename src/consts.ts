@@ -83,6 +83,25 @@ export const ENEMY_TINT: Partial<Record<EnemyKind, string>> = {
   ghost: 'hue-rotate(200deg) saturate(0.3) brightness(1.6)',
 }
 
+/**
+ * 精英词缀：把普通怪随机强化成「变体」。
+ * 复用已有兵种 AI，只改数值与结算，就能让同一批敌人每次遭遇都不一样，
+ * 是性价比很高的变化来源。
+ */
+export type ChampMod = 'swift' | 'tough' | 'volatile' | 'vampiric' | 'shielded'
+export interface ChampDef {
+  id: ChampMod; name: string; color: string
+  hpMul: number; spdMul: number; dmgMul: number; scaleMul: number
+}
+export const CHAMPS: ChampDef[] = [
+  { id: 'swift', name: '疾行', color: '#57e6a0', hpMul: 0.8, spdMul: 1.7, dmgMul: 1, scaleMul: 0.85 },
+  { id: 'tough', name: '坚壳', color: '#9aa4c8', hpMul: 3.2, spdMul: 0.7, dmgMul: 1.2, scaleMul: 1.35 },
+  { id: 'volatile', name: '易爆', color: '#ff7f3f', hpMul: 1.1, spdMul: 1.1, dmgMul: 1, scaleMul: 1.1 },
+  { id: 'vampiric', name: '嗜血', color: '#b13e53', hpMul: 1.6, spdMul: 1.05, dmgMul: 1.3, scaleMul: 1.1 },
+  { id: 'shielded', name: '护盾', color: '#57c7ff', hpMul: 1.4, spdMul: 0.95, dmgMul: 1, scaleMul: 1.15 },
+]
+export const CHAMP_BY_ID = new Map(CHAMPS.map(c => [c.id, c]))
+
 export interface Enemy {
   id: number; kind: EnemyKind
   x: number; y: number
@@ -95,6 +114,7 @@ export interface Enemy {
   burn: number; burnT: number // 炼狱光环的持续燃烧
   bossId: BossId | null // Boss 专属招式分支
   enraged: boolean // Boss 半血狂暴
+  champ: ChampMod | null // 精英词缀
   atkT: number // 远程攻击冷却（骷髅）
   dashT: number; dashCd: number; dashDx: number; dashDy: number // 小恶魔突进方向
   chargeT: number; chargeCd: number; chargeAng: number // 精英/Boss 冲锋
