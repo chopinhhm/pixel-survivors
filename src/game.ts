@@ -15,11 +15,12 @@ import {
 } from './runitems'
 import { makeEmblem } from './sprites'
 import { CHARS, CharDef, getChar } from './chars'
+import { ACHIEVEMENTS, newlyEarned } from './achievements'
 
 // 各敌人贴图渲染缩放（0x72 原始尺寸不同）
 const ENEMY_DRAW_SCALE: Record<string, number> = {
   slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6,
-  bomber: 1.15, turret: 1.1, summoner: 1.1,
+  bomber: 1.15, turret: 1.1, summoner: 1.1, healer: 1.1, ghost: 1.2,
 }
 
 export const VW = 640
@@ -51,7 +52,7 @@ const STASH = { x: -96, y: 46 }
 const FORGE = { x: 96, y: 46 }
 const STATUE = { x: 0, y: 62 }
 const FORGE_COST = 60
-type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner'
+type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner' | 'healer' | 'ghost'
 
 /** 通关层数：打赢第 6 层 Boss 即通关 */
 const FINAL_DEPTH = 6
@@ -74,11 +75,14 @@ const BOSS_BY_ID = new Map(BOSSES.map(b => [b.id, b]))
 const ENEMY_ANIM: Record<EnemyKind, string> = {
   slime: 'slime', bat: 'bat', skel: 'skel', elite: 'elite', boss: 'boss',
   bomber: 'bat', turret: 'skel', summoner: 'skel',
+  healer: 'slime', ghost: 'bat',
 }
 const ENEMY_TINT: Partial<Record<EnemyKind, string>> = {
   bomber: 'hue-rotate(310deg) saturate(2.4) brightness(1.1)',
   turret: 'hue-rotate(110deg) saturate(2) brightness(0.95)',
   summoner: 'hue-rotate(240deg) saturate(2.2)',
+  healer: 'hue-rotate(180deg) saturate(2.6) brightness(1.25)',
+  ghost: 'hue-rotate(200deg) saturate(0.3) brightness(1.6)',
 }
 
 interface Enemy {
@@ -138,6 +142,8 @@ const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: number; r: n
   bomber: { hp: 18, spd: 68, dmg: 26, r: 6, xp: 3, scale: 1.15 },
   turret: { hp: 55, spd: 0, dmg: 12, r: 7, xp: 4, scale: 1.1 },
   summoner: { hp: 48, spd: 26, dmg: 12, r: 6, xp: 5, scale: 1.1 },
+  healer: { hp: 40, spd: 30, dmg: 8, r: 6, xp: 5, scale: 1.1 },
+  ghost: { hp: 30, spd: 30, dmg: 16, r: 6, xp: 4, scale: 1.1 },
 }
 
 export class Game {
@@ -701,7 +707,8 @@ export class Game {
     const n = clamp(Math.round((2 + Math.floor(this.depth * 1.2) + Math.floor(rand(0, 3))) * this.curses.enemyCount), 2, 16)
     // 兵种随层数解锁，让每层的战斗感觉不同
     const kinds: EnemyKind[] =
-      this.depth >= 4 ? ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner']
+      this.depth >= 5 ? ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner', 'healer', 'ghost']
+      : this.depth >= 4 ? ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner', 'ghost']
       : this.depth >= 3 ? ['slime', 'bat', 'skel', 'bomber', 'turret']
       : this.depth >= 2 ? ['slime', 'bat', 'skel', 'bomber']
       : ['slime', 'bat']
@@ -1118,8 +1125,8 @@ export class Game {
     for (const e of this.enemies) {
       if (e.dead) continue
       this.clampToRoom(e, e.r, false)
-      // 小恶魔会飞，可以越过深坑；Boss 体型太大不受地形限制
-      if (e.kind !== 'boss') this.resolveObstacles(e, e.r, e.kind === 'bat')
+      // 小恶魔会飞可越过深坑；幽灵与 Boss 完全无视地形
+      if (e.kind !== 'boss' && e.kind !== 'ghost') this.resolveObstacles(e, e.r, e.kind === 'bat')
     }
     this.rebuildGrid()
     this.separateEnemies()
@@ -1307,6 +1314,7 @@ export class Game {
       if (this.profile.inv.length < INV_CAP) this.profile.inv.push(it)
       else this.lootLost++ // 背包满，明确告知玩家有东西没带回来
     }
+    this.syncAchievements()
     saveProfile(this.profile)
     if (win) sfx.win()
     else sfx.lose()
@@ -1470,6 +1478,36 @@ export class Game {
               this.float(e.x, e.y - 18, '召唤！', '#b98cff', 8)
               this.burst(e.x, e.y, '#b98cff', 10)
             }
+          }
+          break
+        }
+        case 'healer': {
+          // 治疗者：躲在后排回复同伴，逼玩家改变击杀优先级
+          if (d < 170) spd = -e.spd * 0.85
+          e.specialT -= dt
+          if (e.specialT <= 0) {
+            e.specialT = 2.2
+            let healed = 0
+            this.forEachNear(e.x, e.y, 90, o => {
+              if (healed >= 3 || o === e || o.dead || o.hp >= o.maxHp) return
+              if (dist2(o.x, o.y, e.x, e.y) > 90 * 90) return
+              healed++
+              o.hp = Math.min(o.maxHp, o.hp + o.maxHp * 0.18)
+              this.float(o.x, o.y - 14, '+', '#57e6ff', 9)
+              // 治疗连线，让玩家看清是谁在奶
+              this.bolts.push({ pts: [e.x, e.y, o.x, o.y], life: 0.2 })
+            })
+            if (healed) sfx.heal()
+          }
+          break
+        }
+        case 'ghost': {
+          // 幽灵：穿墙穿坑直线逼近，地形对它无效（由 resolveObstacles 处放行）
+          spd = e.spd
+          moveX += Math.sin(this.frameT * 1.5 + e.id) * 0.15
+          moveY += Math.cos(this.frameT * 1.3 + e.id) * 0.15
+          if (chance(0.25)) {
+            this.parts.push({ x: e.x + rand(-5, 5), y: e.y + rand(-5, 5), vx: 0, vy: -6, life: 0.5, maxLife: 0.5, color: '#9fdcff', size: 1 })
           }
           break
         }
@@ -1867,10 +1905,12 @@ export class Game {
     const colors: Record<EnemyKind, string> = {
       slime: '#5ac54f', bat: '#7b5be0', skel: '#e6e6f0', elite: '#e05a4f', boss: '#b13e53',
       bomber: '#ff7f3f', turret: '#7de37d', summoner: '#b98cff',
+      healer: '#57e6ff', ghost: '#cfe8ff',
     }
     this.burst(e.x, e.y, colors[e.kind], e.kind === 'boss' ? 45 : e.kind === 'elite' ? 22 : 9)
     // 金币与装备掉落
-    this.runGold += e.kind === 'boss' ? 120 : e.kind === 'elite' ? 30 : e.kind === 'summoner' ? 5 : 1
+    this.runGold += e.kind === 'boss' ? 120 : e.kind === 'elite' ? 30
+      : (e.kind === 'summoner' || e.kind === 'healer') ? 5 : 1
     if (e.kind === 'boss') { this.dropLoot(e.x, e.y, 2, 35) }
     else if (e.kind === 'elite') { this.dropLoot(e.x, e.y, 1, 18) }
     else if (chance(0.012)) { this.dropLoot(e.x, e.y, 1, 0) }
@@ -1879,6 +1919,10 @@ export class Game {
       sfx.boom()
       this.shake = 1
       this.hitStop = 0.22 // Boss 击杀重顿帧
+      // 记录击败过的 Boss 种类，用于「屠龙者」成就
+      if (e.bossId && !this.profile.ach.bosses.includes(e.bossId)) {
+        this.profile.ach.bosses.push(e.bossId)
+      }
       for (let i = 0; i < 12; i++) this.gems.push({ x: e.x + rand(-20, 20), y: e.y + rand(-20, 20), val: 5, vx: 0, vy: 0 })
       this.hearts.push({ x: e.x, y: e.y })
       this.float(e.x, e.y - 20, 'BOSS 被击败！', '#ffd75e')
@@ -1907,6 +1951,32 @@ export class Game {
       }
     }
   }
+
+  /** 把本局表现并入成就统计，并结算新达成的成就 */
+  syncAchievements() {
+    const a = this.profile.ach
+    a.wins = this.profile.best.wins
+    a.runs = this.profile.runs
+    a.bestDepth = Math.max(a.bestDepth, this.depth)
+    a.totalKills += this.kills
+    a.maxSynergies = Math.max(a.maxSynergies, activeSynergies(this.runItems).length)
+    a.maxCurses = Math.max(a.maxCurses, this.runCurses.length)
+    a.maxItems = Math.max(a.maxItems, this.runItems.length)
+    if (this.endless) a.maxEndless = Math.max(a.maxEndless, this.depth)
+
+    const fresh = newlyEarned(a, this.profile.achs)
+    for (const ach of fresh) {
+      this.profile.achs.push(ach.id)
+      this.profile.gold += ach.gold
+      if (ach.unlockChar && !this.profile.chars.includes(ach.unlockChar)) {
+        this.profile.chars.push(ach.unlockChar)
+      }
+    }
+    this.freshAchs = fresh.map(a2 => a2.id)
+    saveProfile(this.profile)
+  }
+  /** 结算页要展示的新成就 */
+  freshAchs: string[] = []
 
   /** 通关记账。与 endRun 分开：无尽模式下要先记通关，再让玩家继续打 */
   recordWin() {
@@ -2418,7 +2488,7 @@ export class Game {
     g.fillText('选 择 角 色', VW / 2, 34)
     g.font = '8px monospace'
     g.fillStyle = '#9aa4c8'
-    g.fillText('点击选择 · 未解锁的用金币购买 · ESC / C 返回', VW / 2, 50)
+    g.fillText('点击选择 · 未解锁的可用金币购买，或达成成就免费解锁 · ESC / C 返回', VW / 2, 50)
     g.textAlign = 'right'
     g.font = 'bold 10px monospace'
     g.fillStyle = '#ffd75e'
@@ -2471,8 +2541,35 @@ export class Game {
       g.font = 'bold 8px monospace'
       if (sel) { g.fillStyle = c.color; g.fillText('● 已选中', r.x + r.w / 2, r.y + r.h - 8) }
       else if (owned) { g.fillStyle = '#9aa4c8'; g.fillText('点击选择', r.x + r.w / 2, r.y + r.h - 8) }
-      else { g.fillStyle = afford ? '#ffd75e' : '#ff6b6b'; g.fillText(`${c.cost} 金币解锁`, r.x + r.w / 2, r.y + r.h - 8) }
+      else {
+        g.fillStyle = afford ? '#ffd75e' : '#ff6b6b'
+        g.fillText(`${c.cost} 金币解锁`, r.x + r.w / 2, r.y + r.h - 18)
+        // 同时告知免费解锁途径，让成就有指向性
+        const via = ACHIEVEMENTS.find(a => a.unlockChar === c.id)
+        if (via) {
+          g.font = '7px monospace'
+          g.fillStyle = '#57c7ff'
+          g.fillText(`或：${via.desc}`, r.x + r.w / 2, r.y + r.h - 7)
+        }
+      }
     })
+
+    // 成就进度条（底部横排）
+    const st = this.profile.ach
+    g.textAlign = 'left'
+    g.font = '7px monospace'
+    let axx = 24
+    const ayy = VH - 14
+    for (const a of ACHIEVEMENTS) {
+      const done = this.profile.achs.includes(a.id)
+      const [cur, tgt] = a.progress(st)
+      const txt = done ? `✔ ${a.name}` : `${a.name} ${cur}/${tgt}`
+      const w = g.measureText(txt).width + 12
+      if (axx + w > VW - 24) break
+      g.fillStyle = done ? '#57e6a0' : '#5c6285'
+      g.fillText(txt, axx, ayy)
+      axx += w
+    }
   }
 
   // ---------- 特效 ----------
@@ -3338,7 +3435,21 @@ export class Game {
     if (this.lootLost > 0) {
       g.fillStyle = '#ff6b6b'
       g.font = '8px monospace'
-      g.fillText(`⚠ 背包已满，${this.lootLost} 件战利品被丢弃`, cx, y)
+      g.fillText(`⚠ 背包已满，${this.lootLost} 件战利品被丢弃`, cx, y); y += 12
+    }
+    // 新达成的成就
+    if (this.freshAchs.length) {
+      g.font = 'bold 9px monospace'
+      g.fillStyle = '#ffd75e'
+      g.fillText('★ 新成就', cx, y); y += 12
+      g.font = '8px monospace'
+      for (const id of this.freshAchs.slice(0, 3)) {
+        const a = ACHIEVEMENTS.find(x => x.id === id)
+        if (!a) continue
+        g.fillStyle = '#57e6a0'
+        const unlock = a.unlockChar ? ` · 解锁${getChar(a.unlockChar).name}` : ''
+        g.fillText(`${a.name}  +${a.gold}金${unlock}`, cx, y); y += 10
+      }
     }
     g.fillStyle = '#9aa4c8'
     g.font = '9px monospace'

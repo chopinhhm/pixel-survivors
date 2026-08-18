@@ -1,5 +1,6 @@
 // 持久化档案：金币、背包、已装备、最佳纪录
 import type { Item, Slot } from './items'
+import { AchStats, emptyAchStats } from './achievements'
 
 /** depth 是房间制之后的核心成绩（原 wins 依赖已删除的「撑满5分钟」胜利条件） */
 export interface Best { time: number; kills: number; wins: number; depth: number }
@@ -15,6 +16,10 @@ export interface Profile {
   chars: string[]
   /** 当前选中的角色 id */
   char: string
+  /** 已达成的成就 id */
+  achs: string[]
+  /** 成就统计口径 */
+  ach: AchStats
 }
 
 const KEY = 'pxsurv-profile'
@@ -31,6 +36,8 @@ export function emptyProfile(): Profile {
     runs: 0,
     chars: ['knight'],
     char: 'knight',
+    achs: [],
+    ach: emptyAchStats(),
   }
 }
 
@@ -49,6 +56,9 @@ export function loadProfile(): Profile {
         // 老存档没有角色字段，回落到初始角色
         chars: Array.isArray(p.chars) && p.chars.length ? p.chars : base.chars,
         char: p.char || base.char,
+        achs: Array.isArray(p.achs) ? p.achs : [],
+        // 逐字段合并：新增统计项时老档不会缺键
+        ach: { ...base.ach, ...(p.ach || {}), bosses: Array.isArray(p.ach?.bosses) ? p.ach!.bosses : [] },
       }
     }
     // 迁移旧版只存纪录的存档，避免老玩家纪录丢失
