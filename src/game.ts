@@ -203,6 +203,10 @@ export class Game {
   /** 挑战房波次进度 */
   challengeActive = false
   challengeWave = 0
+  /** 连击：持续击杀累积，断了就清零 */
+  combo = 0
+  comboT = 0
+  comboBest = 0
   fireT = 0
   orbAng = 0
   boltT = 0
@@ -352,6 +356,7 @@ export class Game {
     this.devilDeals = 0
     this.challengeActive = false
     this.challengeWave = 0
+    this.combo = 0; this.comboT = 0; this.comboBest = 0
     this.fireT = 0; this.orbAng = 0; this.boltT = 0
     this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
@@ -1091,6 +1096,11 @@ export class Game {
 
     this.roomFlash = Math.max(0, this.roomFlash - dt)
     this.freezeAll = Math.max(0, this.freezeAll - dt)
+    // 连击窗口：停手就断
+    if (this.combo > 0) {
+      this.comboT -= dt
+      if (this.comboT <= 0) this.combo = 0
+    }
     for (const o of this.obs) if (o.flash > 0) o.flash = Math.max(0, o.flash - dt)
 
     // 主动技能
@@ -1907,6 +1917,15 @@ export class Game {
     e.deathT = 0.18
     e.flash = 0.12
     this.kills++
+    // 连击：2.5 秒内接着击杀就累积，里程碑给金币奖励
+    this.combo++
+    this.comboT = 2.5
+    if (this.combo > this.comboBest) this.comboBest = this.combo
+    if (this.combo > 0 && this.combo % 10 === 0) {
+      const bonus = Math.round(this.combo * 0.6)
+      this.gainCoin(bonus)
+      this.float(this.px, this.py - 40, `${this.combo} 连击！+${bonus}`, '#ffd75e', 11)
+    }
     const colors: Record<EnemyKind, string> = {
       slime: '#5ac54f', bat: '#7b5be0', skel: '#e6e6f0', elite: '#e05a4f', boss: '#b13e53',
       bomber: '#ff7f3f', turret: '#7de37d', summoner: '#b98cff',
@@ -2586,7 +2605,15 @@ export class Game {
   }
 
   float(x: number, y: number, txt: string, color: string, size = 7) {
-    if (this.floats.length < 60) this.floats.push({ x, y, txt, life: 0.8, color, size })
+    if (this.floats.length >= 60) return
+    // 同位置堆叠时上推，否则密集输出会糊成一坨看不清打了多少
+    let yy = y
+    for (let i = 0; i < 6; i++) {
+      const clash = this.floats.some(f => f.life > 0.45 && Math.abs(f.x - x) < 16 && Math.abs(f.y - yy) < 9)
+      if (!clash) break
+      yy -= 9
+    }
+    this.floats.push({ x, y: yy, txt, life: 0.8, color, size })
   }
 
   updateFx(dt: number) {
@@ -2982,18 +3009,32 @@ export class Game {
     this.g.drawImage(spr, Math.round(x - w / 2), Math.round(y - h / 2), w, h)
   }
 
-  // 加色辉光：叠在特效下层，制造发光感
+  /**
+   * 加色辉光。渐变按「半径+颜色」缓存在原点，靠 translate 定位。
+   * createRadialGradient 是 canvas 里明确偏贵的调用，而子弹辉光每帧最多要画
+   * 260 次（弹幕上限），每次重建渐变是纯浪费。半径取整以收敛缓存键。
+   */
+  private gradCache = new Map<string, CanvasGradient>()
   glow(x: number, y: number, r: number, color: string, alpha = 0.5) {
     const g = this.g
+    const rr = Math.max(1, Math.round(r))
+    const key = rr + color
+    let rg = this.gradCache.get(key)
+    if (!rg) {
+      rg = g.createRadialGradient(0, 0, 0, 0, 0, rr)
+      rg.addColorStop(0, color)
+      rg.addColorStop(1, 'rgba(0,0,0,0)')
+      // 颜色来自固定调色板、半径已取整，键是收敛的；上限只是防御性兜底
+      if (this.gradCache.size > 400) this.gradCache.clear()
+      this.gradCache.set(key, rg)
+    }
     g.save()
     g.globalCompositeOperation = 'lighter'
     g.globalAlpha = alpha
-    const rg = g.createRadialGradient(x, y, 0, x, y, r)
-    rg.addColorStop(0, color)
-    rg.addColorStop(1, 'rgba(0,0,0,0)')
+    g.translate(x, y)
     g.fillStyle = rg
     g.beginPath()
-    g.arc(x, y, r, 0, Math.PI * 2)
+    g.arc(0, 0, rr, 0, Math.PI * 2)
     g.fill()
     g.restore()
   }
@@ -3135,6 +3176,20 @@ export class Game {
       g.font = '8px monospace'
       g.fillStyle = '#ff4f6b'
       g.fillText(`诅咒 x${this.runCurses.length}`, 4, 38)
+    }
+    // 连击：数字随连击数放大，快断时闪烁警示
+    if (this.combo >= 3) {
+      const urgent = this.comboT < 0.8
+      g.textAlign = 'center'
+      g.font = `bold ${Math.min(20, 10 + this.combo * 0.25)}px monospace`
+      g.fillStyle = urgent && Math.floor(this.frameT * 10) % 2 === 0 ? '#5c6285' : '#ffd75e'
+      g.fillText(`${this.combo} COMBO`, VW / 2, 42)
+      // 连击剩余时间条
+      const bw = 60
+      g.fillStyle = '#171a2e'
+      g.fillRect(VW / 2 - bw / 2, 46, bw, 3)
+      g.fillStyle = urgent ? '#ff4f6b' : '#ffd75e'
+      g.fillRect(VW / 2 - bw / 2, 46, bw * clamp(this.comboT / 2.5, 0, 1), 3)
     }
     const r = this.room
     if (r) {
@@ -3408,6 +3463,11 @@ export class Game {
     g.font = '10px monospace'
     g.fillStyle = '#ffffff'
     g.fillText(`第 ${this.depth} 层  ·  存活 ${fmtTime(this.t)}  ·  击杀 ${this.kills}`, cx, y); y += 16
+    if (this.comboBest >= 5) {
+      g.fillStyle = '#ffd75e'
+      g.font = '9px monospace'
+      g.fillText(`最高连击 ${this.comboBest}`, cx, y); y += 14
+    }
     const itemCount = this.runItems.length
     if (itemCount > 0) {
       g.fillStyle = '#ffd75e'
