@@ -1,7 +1,7 @@
 import { SPR, FLOOR, HUB_FLOOR } from './sprites'
 import { frame } from './assets'
 import { Input } from './input'
-import { sfx, toggleMute, isMuted } from './audio'
+import { sfx, toggleMute, isMuted, setMusicMode } from './audio'
 import { clamp, rand, pick, chance, dist2, fmtTime } from './util'
 import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, fmtMod, fmtStat, StatKey } from './items'
 import { Profile, loadProfile, saveProfile, INV_CAP, RunSave, RUN_SAVE_VER, saveRun, loadRun, clearRun } from './save'
@@ -741,12 +741,12 @@ export class Game {
       if (!this.active && chance(0.45)) {
         return [{ x: ROOM_W / 2, y: cy, item: null, act: rollActive(), price: 0, kind: 'free', taken: false }]
       }
-      return [{ x: ROOM_W / 2, y: cy, item: rollRunItem(luck), act: null, price: 0, kind: 'free', taken: false }]
+      return [{ x: ROOM_W / 2, y: cy, item: rollRunItem(luck, this.runItems), act: null, price: 0, kind: 'free', taken: false }]
     }
     if (r.type === 'shop') {
       // 商店：3 件明码标价，让局内金币有真实用途
       return [0, 1, 2].map(i => {
-        const item = rollRunItem(luck)
+        const item = rollRunItem(luck, this.runItems)
         const price = Math.round(([28, 45, 70][item.tier] + this.depth * 6) * this.curses.shopMul)
         return { x: ROOM_W / 2 + (i - 1) * 110, y: cy, item, act: null, price, kind: 'gold' as const, taken: false }
       })
@@ -754,7 +754,7 @@ export class Game {
     if (r.type === 'devil') {
       // 恶魔房：用生命换强力道具，稀有度拉高
       return [0, 1].map(i => {
-        const item = rollRunItem(luck + 45)
+        const item = rollRunItem(luck + 45, this.runItems)
         return { x: ROOM_W / 2 + (i === 0 ? -80 : 80), y: cy, item, act: null, price: 22 + this.depth * 3, kind: 'hp' as const, taken: false }
       })
     }
@@ -762,7 +762,7 @@ export class Game {
       // 天使房：两件白送的高稀有度道具，作为「不与恶魔交易」的回报
       return [0, 1].map(i => ({
         x: ROOM_W / 2 + (i === 0 ? -80 : 80), y: cy,
-        item: rollRunItem(luck + 55), act: null,
+        item: rollRunItem(luck + 55, this.runItems), act: null,
         price: 0, kind: 'free' as const, taken: false,
       }))
     }
@@ -770,7 +770,7 @@ export class Game {
       // 挑战房：奖励台先锁着，打完三波才开放
       return [{
         x: ROOM_W / 2, y: cy,
-        item: rollRunItem(luck + 60), act: null,
+        item: rollRunItem(luck + 60, this.runItems), act: null,
         price: 0, kind: 'free' as const, taken: false,
       }]
     }
@@ -780,7 +780,7 @@ export class Game {
       if (curse) {
         return [{
           x: ROOM_W / 2, y: cy,
-          item: rollRunItem(luck + 70), act: null,
+          item: rollRunItem(luck + 70, this.runItems), act: null,
           price: 0, kind: 'curse' as const, taken: false, curse,
         }]
       }
@@ -1006,6 +1006,7 @@ export class Game {
   // ---------- 家园：安全区，传送门出发 / 储物箱管理背包 / 熔炉花金币 ----------
   enterHub() {
     this.state = 'hub'
+    setMusicMode('normal') // 回家一定要退出 Boss 曲，否则会一直紧张下去
     this.px = 0; this.py = 0
     this.camX = 0; this.camY = 0
     this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
@@ -1138,6 +1139,10 @@ export class Game {
     this.updateChests(dt)
     this.updateFx(dt)
     this.checkPlayerHit()
+
+    // 音乐分层：Boss 战与狂暴阶段各换一层
+    const liveBoss = this.boss && !this.boss.dead
+    setMusicMode(liveBoss ? (this.boss!.enraged ? 'rage' : 'boss') : 'normal')
 
     this.checkRoomClear()
     this.updatePedestal()
@@ -2210,7 +2215,7 @@ export class Game {
         c.opened = 0.01 // 触发开箱动画（渐进到 1）
         sfx.levelup()
         this.burst(c.x, c.y, '#ffd75e', 14)
-        const it = rollRunItem(this.stats.luck + this.depth * 2)
+        const it = rollRunItem(this.stats.luck + this.depth * 2, this.runItems)
         this.addRunItem(it)
         this.burst(c.x, c.y, it.color, 16)
         this.float(c.x, c.y - 20, `获得 ${it.name}！`, it.color, 10)

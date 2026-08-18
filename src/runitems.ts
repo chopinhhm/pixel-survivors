@@ -326,11 +326,42 @@ export function computeStats(ids: string[]): RunStats {
   return s
 }
 
-/** 按稀有度加权随机抽一件（luck 提高高稀有度概率） */
-export function rollRunItem(luck = 0): RunItem {
+/** 这件道具能否补齐某条协同的最后一块拼图 */
+function completesSynergy(id: string, owned: Set<string>): boolean {
+  return SYNERGIES.some(sy =>
+    sy.requires.includes(id) &&
+    !sy.requires.every(r => owned.has(r)) &&
+    sy.requires.every(r => r === id || owned.has(r)))
+}
+
+/**
+ * 按稀有度加权随机抽一件。
+ * - luck 提高高稀有度概率
+ * - 已持有的道具权重衰减：纯均匀随机会让一局里反复捡到同一件，
+ *   协同永远凑不齐，玩家也感受不到 build 在成长
+ * - 能补齐协同的道具权重提升：协同是设计的核心乐趣，不该全靠运气撞
+ */
+export function rollRunItem(luck = 0, owned: string[] = []): RunItem {
   const r = Math.random() * 100 - luck
   const tier = r < 8 ? 2 : r < 34 ? 1 : 0
   const pool = RUN_ITEMS.filter(i => i.tier === tier)
   const use = pool.length ? pool : RUN_ITEMS
-  return use[Math.floor(Math.random() * use.length)]
+
+  const counts = new Map<string, number>()
+  for (const id of owned) counts.set(id, (counts.get(id) || 0) + 1)
+  const ownedSet = new Set(owned)
+
+  const weights = use.map(i => {
+    let w = 1 / (1 + (counts.get(i.id) || 0) * 2) // 第2件权重1/3，第3件1/5……
+    if (completesSynergy(i.id, ownedSet)) w *= 2.5
+    return w
+  })
+  const total = weights.reduce((a, b) => a + b, 0)
+  if (total <= 0) return use[Math.floor(Math.random() * use.length)]
+  let t = Math.random() * total
+  for (let i = 0; i < use.length; i++) {
+    t -= weights[i]
+    if (t <= 0) return use[i]
+  }
+  return use[use.length - 1]
 }

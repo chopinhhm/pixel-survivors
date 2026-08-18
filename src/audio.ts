@@ -68,27 +68,61 @@ export const sfx = {
   lose() { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.26, 'sawtooth', 0.09, 0, i * 0.16)) },
 }
 
-// ---------- 背景音乐：16 步循环贝斯 + 隔小节琶音 ----------
-const BASS = [110, 0, 110, 0, 131, 0, 98, 0, 110, 0, 110, 0, 87, 0, 98, 0]
-const LEAD = [440, 0, 523, 0, 440, 659, 0, 523, 440, 0, 392, 0, 440, 523, 659, 0]
+// ---------- 背景音乐：16 步循环，按战况分层 ----------
+// 同一套合成器，换音阶与速度就能把「探索 / Boss / 狂暴」区分开，
+// 比多写几首曲子省事得多，也不需要任何音频素材。
+export type MusicMode = 'normal' | 'boss' | 'rage'
+
+interface Pattern { bass: number[]; lead: number[]; step: number; leadEvery: number; wave: OscillatorType }
+const PATTERNS: Record<MusicMode, Pattern> = {
+  // 探索：舒缓的小调循环
+  normal: {
+    bass: [110, 0, 110, 0, 131, 0, 98, 0, 110, 0, 110, 0, 87, 0, 98, 0],
+    lead: [440, 0, 523, 0, 440, 659, 0, 523, 440, 0, 392, 0, 440, 523, 659, 0],
+    step: 0.16, leadEvery: 2, wave: 'triangle',
+  },
+  // Boss：低八度推进，锯齿主音，速度加快
+  boss: {
+    bass: [73, 73, 0, 87, 73, 0, 98, 0, 73, 73, 0, 87, 65, 0, 82, 0],
+    lead: [294, 0, 349, 392, 294, 0, 233, 0, 294, 349, 392, 0, 466, 392, 349, 0],
+    step: 0.13, leadEvery: 1, wave: 'sawtooth',
+  },
+  // 狂暴：更快更密，半音上行制造紧迫
+  rage: {
+    bass: [69, 69, 82, 69, 92, 69, 82, 69, 69, 69, 82, 69, 104, 92, 82, 69],
+    lead: [277, 330, 370, 415, 277, 330, 370, 415, 466, 415, 370, 330, 277, 330, 370, 415],
+    step: 0.105, leadEvery: 1, wave: 'sawtooth',
+  },
+}
+
+let musicMode: MusicMode = 'normal'
 let step = 0
 let nextT = 0
+
+/** 切换背景音乐层。切换时重置小节，避免节奏错位 */
+export function setMusicMode(m: MusicMode) {
+  if (m === musicMode) return
+  musicMode = m
+  step = 0
+}
+export function getMusicMode() { return musicMode }
 
 function startMusic() {
   if (!ac) return
   nextT = ac.currentTime + 0.1
   setInterval(() => {
     if (!ac) return
+    const p = PATTERNS[musicMode]
     while (nextT < ac.currentTime + 0.25) {
       const d = nextT - ac.currentTime
-      const b = BASS[step % 16]
-      if (b) tone(b, 0.16, 'square', 0.05, 0, d)
-      if (Math.floor(step / 16) % 2 === 1) {
-        const l = LEAD[step % 16]
-        if (l) tone(l, 0.09, 'triangle', 0.03, 0, d)
+      const b = p.bass[step % 16]
+      if (b) tone(b, p.step, 'square', 0.05, 0, d)
+      if (Math.floor(step / 16) % p.leadEvery === (p.leadEvery === 1 ? 0 : 1)) {
+        const l = p.lead[step % 16]
+        if (l) tone(l, p.step * 0.6, p.wave, musicMode === 'normal' ? 0.03 : 0.045, 0, d)
       }
       step++
-      nextT += 0.16
+      nextT += p.step
     }
   }, 100)
 }
