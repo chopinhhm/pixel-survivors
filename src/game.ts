@@ -10,7 +10,7 @@ import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
 import {
   RunStats, RunItem, ActiveItem, Curse, CurseMods,
   baseStats, computeStats, rollRunItem, rollActive, rollCurse, computeCurses, baseCurses,
-  activeSynergies,
+  activeSynergies, previewItem, previewSynergies,
   ITEM_BY_ID, ACTIVE_BY_ID, CURSE_BY_ID,
 } from './runitems'
 import { makeEmblem } from './sprites'
@@ -39,6 +39,16 @@ const OBY = (ROOM_H - OB_ROWS * OB_CELL) / 2
 // 中央十字：必须保持可通行，否则会把玩家和门隔开
 const CROSS_COL = Math.round((ROOM_W / 2 - OBX) / OB_CELL - 0.5)
 const CROSS_ROW = Math.round((ROOM_H / 2 - OBY) / OB_CELL - 0.5)
+
+/** 特殊房的氛围配色：地面染色 + 墙体 + 暗角，让房间类型不靠文字也能一眼认出 */
+const ROOM_MOOD: Partial<Record<string, { floor: string; wall: string; vignette: string }>> = {
+  treasure: { floor: 'rgba(255,215,94,0.12)', wall: '#5a4a1e', vignette: 'rgba(40,30,0,0.5)' },
+  shop: { floor: 'rgba(87,230,160,0.10)', wall: '#1e5a44', vignette: 'rgba(0,35,25,0.5)' },
+  devil: { floor: 'rgba(177,62,83,0.18)', wall: '#5a1e2a', vignette: 'rgba(45,0,10,0.62)' },
+  angel: { floor: 'rgba(255,240,200,0.16)', wall: '#6a6248', vignette: 'rgba(30,28,18,0.42)' },
+  challenge: { floor: 'rgba(255,159,79,0.13)', wall: '#5a3a1e', vignette: 'rgba(40,20,0,0.5)' },
+  boss: { floor: 'rgba(177,62,83,0.10)', wall: '#4a1a24', vignette: 'rgba(35,0,8,0.58)' },
+}
 
 type ObKind = 'rock' | 'spike' | 'pit'
 interface Ob { col: number; row: number; kind: ObKind; hp: number; maxHp: number; flash: number }
@@ -2758,6 +2768,26 @@ export class Game {
       g.font = '7px monospace'
       g.fillStyle = '#9aa4c8'
       g.fillText(desc, W(ped.x), H(ped.y) + 22)
+
+      // 靠近时展开真实数值变化：静态文案说不清叠加后的结果
+      if (ped.item && dist2(ped.x, ped.y, this.px, this.py) < 70 * 70) {
+        const lines = previewItem(this.runItems, ped.item.id)
+        let py = H(ped.y) - 36
+        g.font = '7px monospace'
+        for (const l of lines.slice(0, 5)) {
+          g.fillStyle = l.includes('↓') ? '#ff8a8a' : '#57e6a0'
+          g.fillText(l, W(ped.x), py)
+          py -= 9
+        }
+        // 能凑成协同的话提前预告，这是玩家最该知道的信息
+        const syn = previewSynergies(this.runItems, ped.item.id)
+        for (const sy of syn) {
+          g.font = 'bold 8px monospace'
+          g.fillStyle = sy.color
+          g.fillText(`★ 将触发协同：${sy.name}`, W(ped.x), py)
+          py -= 10
+        }
+      }
       // 价格
       if (ped.kind === 'gold') {
         const afford = this.runGold >= ped.price
@@ -3068,8 +3098,15 @@ export class Game {
       }
     }
 
+    // 特殊房的地面染色：走进门的第一眼就知道这是什么房间
+    const mood = this.room ? ROOM_MOOD[this.room.type] : undefined
+    if (mood) {
+      g.fillStyle = mood.floor
+      g.fillRect(ox, oy, ROOM_W, ROOM_H)
+    }
+
     // 墙体
-    g.fillStyle = '#1a1626'
+    g.fillStyle = mood ? mood.wall : '#1a1626'
     g.fillRect(ox - WALL, oy - WALL, ROOM_W + WALL * 2, WALL)
     g.fillRect(ox - WALL, oy + ROOM_H, ROOM_W + WALL * 2, WALL)
     g.fillRect(ox - WALL, oy, WALL, ROOM_H)
@@ -3113,7 +3150,7 @@ export class Game {
     const vis = this.curses.vision
     const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.4 * vis, VW / 2, VH / 2, VH * 0.95 * vis)
     vg.addColorStop(0, 'rgba(0,0,0,0)')
-    vg.addColorStop(1, vis < 1 ? 'rgba(0,0,0,0.92)' : 'rgba(0,0,0,0.5)')
+    vg.addColorStop(1, vis < 1 ? 'rgba(0,0,0,0.92)' : (mood ? mood.vignette : 'rgba(0,0,0,0.5)'))
     g.fillStyle = vg
     g.fillRect(0, 0, VW, VH)
 

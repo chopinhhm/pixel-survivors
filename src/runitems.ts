@@ -223,6 +223,68 @@ export const SYNERGIES: Synergy[] = [
   },
 ]
 
+// ---------------- 属性差异展示 ----------------
+// 静态描述文案（"伤害 +30%"）说不清叠加后的真实结果：
+// 已经有 3 件力量护符时，第 4 件到底带来多少？把「现在 → 拿了之后」直接算给玩家看。
+
+type StatFmt = 'mul' | 'int' | 'pct' | 'flat'
+const STAT_META: Partial<Record<keyof RunStats, { name: string; fmt: StatFmt }>> = {
+  dmg: { name: '伤害', fmt: 'mul' },
+  rate: { name: '射速', fmt: 'mul' },
+  speed: { name: '弹速', fmt: 'mul' },
+  range: { name: '射程', fmt: 'mul' },
+  size: { name: '弹体', fmt: 'mul' },
+  moveSpd: { name: '移速', fmt: 'mul' },
+  magnet: { name: '拾取', fmt: 'mul' },
+  goldMul: { name: '金币', fmt: 'mul' },
+  count: { name: '弹数', fmt: 'int' },
+  pierce: { name: '穿透', fmt: 'int' },
+  bounce: { name: '弹射', fmt: 'int' },
+  split: { name: '分裂', fmt: 'int' },
+  chain: { name: '连锁', fmt: 'int' },
+  orbit: { name: '法球', fmt: 'int' },
+  burn: { name: '点燃', fmt: 'int' },
+  homing: { name: '追踪', fmt: 'flat' },
+  explode: { name: '爆炸', fmt: 'mul' },
+  crit: { name: '暴击', fmt: 'pct' },
+  freeze: { name: '冰冻', fmt: 'pct' },
+  vamp: { name: '吸血', fmt: 'pct' },
+  armor: { name: '减伤', fmt: 'pct' },
+  maxHp: { name: '生命上限', fmt: 'flat' },
+  regen: { name: '回复', fmt: 'flat' },
+  aura: { name: '光环', fmt: 'flat' },
+  bolt: { name: '落雷', fmt: 'flat' },
+  luck: { name: '幸运', fmt: 'flat' },
+}
+
+function fmtVal(v: number, fmt: StatFmt): string {
+  if (fmt === 'mul') return v.toFixed(2) + 'x'
+  if (fmt === 'pct') return Math.round(v * 100) + '%'
+  if (fmt === 'int') return String(Math.round(v))
+  return (Math.round(v * 10) / 10).toString()
+}
+
+/** 拾取这件道具会带来的实际属性变化，逐条给出「现在 → 之后」 */
+export function previewItem(ownedIds: string[], itemId: string): string[] {
+  const before = computeStats(ownedIds)
+  const after = computeStats([...ownedIds, itemId])
+  const out: string[] = []
+  for (const k of Object.keys(STAT_META) as (keyof RunStats)[]) {
+    const meta = STAT_META[k]!
+    const a = before[k], b = after[k]
+    if (Math.abs(a - b) < 1e-6) continue
+    const up = b > a
+    out.push(`${meta.name} ${fmtVal(a, meta.fmt)} ${up ? '↑' : '↓'} ${fmtVal(b, meta.fmt)}`)
+  }
+  return out
+}
+
+/** 拾取后会新触发的协同名，用于在道具台上提前预告 */
+export function previewSynergies(ownedIds: string[], itemId: string): Synergy[] {
+  const before = new Set(activeSynergies(ownedIds).map(s => s.id))
+  return activeSynergies([...ownedIds, itemId]).filter(s => !before.has(s.id))
+}
+
 /** 返回当前道具组合已激活的协同 */
 export function activeSynergies(ids: string[]): Synergy[] {
   const owned = new Set(ids)
