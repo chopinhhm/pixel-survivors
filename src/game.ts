@@ -6,7 +6,7 @@ import { clamp, rand, pick, chance, dist2, fmtTime } from './util'
 import { Item, Slot, SLOTS, SLOT_NAME, RARITY, rollItem, statTotal, itemScore, fmtMod, fmtStat, StatKey } from './items'
 import { Profile, loadProfile, saveProfile, INV_CAP, RunSave, RUN_SAVE_VER, saveRun, loadRun, clearRun } from './save'
 import { Floor, RoomDef, Dir, DIRS, DIR_LIST, genFloor, rkey, hasDoor } from './rooms'
-import { LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
+import { LAYOUTS, BOSS_LAYOUTS, OB_COLS, OB_ROWS, OB_CELL } from './layouts'
 import {
   RunStats, RunItem, ActiveItem, Curse, CurseMods,
   baseStats, computeStats, rollRunItem, rollActive, rollCurse, computeCurses, baseCurses,
@@ -429,11 +429,17 @@ export class Game {
     let list = this.roomObs.get(key)
     if (!list) {
       list = []
-      // Boss 房和宝箱房保持空旷，避免挡住 Boss 弹幕和道具台
+      // 普通房用主题地形；Boss 房用与该 Boss 招式匹配的专属战场；其余特殊房保持空旷
+      let tpl: string[] | null = null
       if (r.type === 'normal') {
         // 地形模板从本层主题的可选集里取，让每层的战场结构也有辨识度
         const pool = themeFor(this.depth).layouts
-        const tpl = LAYOUTS[pool[r.seed % pool.length] % LAYOUTS.length]
+        tpl = LAYOUTS[pool[r.seed % pool.length] % LAYOUTS.length]
+      } else if (r.type === 'boss') {
+        // 与 populateRoom 用同一套 seed 取 Boss，保证战场和 Boss 对得上
+        tpl = BOSS_LAYOUTS[BOSSES[r.seed % BOSSES.length].id] ?? null
+      }
+      if (tpl) {
         for (let row = 0; row < OB_ROWS; row++) {
           for (let col = 0; col < OB_COLS; col++) {
             const ch = tpl[row][col]
