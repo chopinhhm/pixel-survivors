@@ -116,6 +116,16 @@ export function themeFor(depth: number): FloorTheme {
   return tail[(depth - FLOOR_THEMES.length - 1) % tail.length]
 }
 
+/**
+ * 每深入一层获得的生命上限。
+ * 审计发现：不给这个的话，玩家等效生命全程只增长 1.01 倍，
+ * 而敌人伤害按 1+0.25(层-1) 递增，到第 6 层只能挨 3.5 下 —— 防御侧完全没有成长。
+ */
+export const DEPTH_HP_BONUS = 12
+
+/** 敌人血量随层数的增长系数（审计后由 0.45 下调，原值导致后期清层要 3~4 分钟） */
+export const ENEMY_HP_SCALE = 0.34
+
 /** 通关层数：打赢第 6 层 Boss 即通关 */
 export const FINAL_DEPTH = 6
 

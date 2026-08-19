@@ -24,7 +24,7 @@ import {
   OBX, OBY, CROSS_COL, CROSS_ROW, ROOM_MOOD,
   HUB, PORTAL, STASH, FORGE, STATUE, FORGE_COST,
   FINAL_DEPTH, BOSSES, BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_BASE,
-  CHAMPS, CHAMP_BY_ID, themeFor,
+  CHAMPS, CHAMP_BY_ID, themeFor, DEPTH_HP_BONUS, ENEMY_HP_SCALE,
 } from './consts'
 import type {
   ObKind, Ob, State, EnemyKind, BossId, BossDef, Enemy, Shot, EProj,
@@ -160,7 +160,8 @@ export class Game {
   get baseHp() { return this.runChar.hp }
   /** 生命上限唯一算法：角色 + 装备 + 道具，再乘诅咒。散落多处会导致口径不一致 */
   computeMaxHp() {
-    return Math.max(1, Math.round((this.baseHp + this.eq.maxHp + this.stats.maxHp) * this.curses.maxHpMul))
+    const depthBonus = (this.depth - 1) * DEPTH_HP_BONUS
+    return Math.max(1, Math.round((this.baseHp + depthBonus + this.eq.maxHp + this.stats.maxHp) * this.curses.maxHpMul))
   }
 
   // 角色 × 局内道具(stats) × 局外装备(eq) 三层叠加
@@ -590,7 +591,7 @@ export class Game {
       e.r = def.r
       e.scale = def.scale
       const isFinal = this.depth >= FINAL_DEPTH
-      const hpScale = (1 + (this.depth - 1) * 0.45) * (isFinal ? 1.6 : 1)
+      const hpScale = (1 + (this.depth - 1) * ENEMY_HP_SCALE) * (isFinal ? 1.6 : 1)
       e.hp = e.maxHp = def.hp * hpScale
       e.dmg = def.dmg * (1 + (this.depth - 1) * 0.25)
       this.boss = e
@@ -601,7 +602,7 @@ export class Game {
     }
 
     // 普通房：按层数堆量，随机兵种组合
-    const n = clamp(Math.round((2 + Math.floor(this.depth * 1.2) + Math.floor(rand(0, 3))) * this.curses.enemyCount), 2, 16)
+    const n = clamp(Math.round((3 + Math.floor(this.depth * 0.55) + Math.floor(rand(0, 3))) * this.curses.enemyCount), 2, 16)
     // 兵种由楼层主题决定，每层的战斗构成因此各不相同
     const theme = themeFor(this.depth)
     const kinds: EnemyKind[] = theme.kinds
@@ -802,8 +803,14 @@ export class Game {
     this.roomObs.clear()
     this.roomPeds.clear()
     this.enterRoom(this.floor.startKey, null)
+    // 深入一层同时提升生命上限并回一部分血，让「往下走」本身构成成长。
+    // 不给的话审计显示玩家等效生命全程零增长，而敌人伤害是递增的。
+    const before = this.maxHp
+    this.maxHp = this.computeMaxHp()
+    this.hp = Math.min(this.maxHp, this.hp + (this.maxHp - before) + this.maxHp * 0.2)
     const th = themeFor(this.depth)
     this.float(this.px, this.py - 30, `第 ${this.depth} 层 · ${th.name}`, '#ffd75e', 13)
+    this.float(this.px, this.py - 44, `生命上限 +${DEPTH_HP_BONUS}`, '#7de37d', 10)
     sfx.win()
   }
 
@@ -1228,7 +1235,7 @@ export class Game {
   spawnEnemyAt(kind: EnemyKind, x: number, y: number): Enemy {
     const base = ENEMY_BASE[kind]
     // 强度按楼层深度递增（房间制下不再按存活时间）
-    const hpScale = 1 + (this.depth - 1) * 0.45
+    const hpScale = 1 + (this.depth - 1) * ENEMY_HP_SCALE
     const dmgScale = 1 + (this.depth - 1) * 0.25
     const e: Enemy = {
       id: this.eid++, kind,
