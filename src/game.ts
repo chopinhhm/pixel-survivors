@@ -24,7 +24,7 @@ import {
   OBX, OBY, CROSS_COL, CROSS_ROW, ROOM_MOOD,
   HUB, PORTAL, STASH, FORGE, STATUE, FORGE_COST,
   FINAL_DEPTH, BOSSES, BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_BASE,
-  CHAMPS, CHAMP_BY_ID,
+  CHAMPS, CHAMP_BY_ID, themeFor,
 } from './consts'
 import type {
   ObKind, Ob, State, EnemyKind, BossId, BossDef, Enemy, Shot, EProj,
@@ -431,7 +431,9 @@ export class Game {
       list = []
       // Boss 房和宝箱房保持空旷，避免挡住 Boss 弹幕和道具台
       if (r.type === 'normal') {
-        const tpl = LAYOUTS[r.seed % LAYOUTS.length]
+        // 地形模板从本层主题的可选集里取，让每层的战场结构也有辨识度
+        const pool = themeFor(this.depth).layouts
+        const tpl = LAYOUTS[pool[r.seed % pool.length] % LAYOUTS.length]
         for (let row = 0; row < OB_ROWS; row++) {
           for (let col = 0; col < OB_COLS; col++) {
             const ch = tpl[row][col]
@@ -589,13 +591,9 @@ export class Game {
 
     // 普通房：按层数堆量，随机兵种组合
     const n = clamp(Math.round((2 + Math.floor(this.depth * 1.2) + Math.floor(rand(0, 3))) * this.curses.enemyCount), 2, 16)
-    // 兵种随层数解锁，让每层的战斗感觉不同
-    const kinds: EnemyKind[] =
-      this.depth >= 5 ? ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner', 'healer', 'ghost']
-      : this.depth >= 4 ? ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner', 'ghost']
-      : this.depth >= 3 ? ['slime', 'bat', 'skel', 'bomber', 'turret']
-      : this.depth >= 2 ? ['slime', 'bat', 'skel', 'bomber']
-      : ['slime', 'bat']
+    // 兵种由楼层主题决定，每层的战斗构成因此各不相同
+    const theme = themeFor(this.depth)
+    const kinds: EnemyKind[] = theme.kinds
     for (let i = 0; i < n; i++) {
       const a = (Math.PI * 2 * i) / n + rand(-0.3, 0.3)
       let x = 0, y = 0
@@ -609,7 +607,7 @@ export class Game {
       }
       const e = this.spawnEnemyAt(pick(kinds), x, y)
       // 精英变体：出现率随层数上升，让后期每间房都可能有硬点
-      if (chance(Math.min(0.3, 0.05 + this.depth * 0.035))) this.makeChampion(e)
+      if (chance(Math.min(0.34, 0.05 + this.depth * 0.03 + theme.champBonus))) this.makeChampion(e)
     }
     // 精英作为「房间挑战」偶发出现
     if (this.depth >= 2 && chance(0.18)) {
@@ -677,9 +675,8 @@ export class Game {
   /** 挑战房的一波敌人。越往后越猛 */
   spawnWave(wave: number) {
     const n = 4 + wave * 2 + Math.floor(this.depth * 0.8)
-    const pool: EnemyKind[] = this.depth >= 3
-      ? ['slime', 'bat', 'skel', 'bomber', 'turret']
-      : ['slime', 'bat', 'skel', 'bomber']
+    // 挑战房沿用本层主题的兵种，保持该层的战斗调性
+    const pool: EnemyKind[] = themeFor(this.depth).kinds
     for (let i = 0; i < n; i++) {
       const a = (Math.PI * 2 * i) / n + rand(-0.2, 0.2)
       const rad = rand(70, Math.min(ROOM_W, ROOM_H) * 0.42)
@@ -794,7 +791,8 @@ export class Game {
     this.roomObs.clear()
     this.roomPeds.clear()
     this.enterRoom(this.floor.startKey, null)
-    this.float(this.px, this.py - 30, `第 ${this.depth} 层`, '#ffd75e', 12)
+    const th = themeFor(this.depth)
+    this.float(this.px, this.py - 30, `第 ${this.depth} 层 · ${th.name}`, '#ffd75e', 13)
     sfx.win()
   }
 

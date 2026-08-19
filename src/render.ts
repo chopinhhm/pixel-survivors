@@ -20,7 +20,7 @@ import { getChar } from './chars'
 import {
   VW, VH, ROOM_W, ROOM_H, FINAL_DEPTH,
   HUB, PORTAL, STASH, FORGE, STATUE, FORGE_COST,
-  BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_DRAW_SCALE, ENEMY_BASE,
+  BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_DRAW_SCALE, ENEMY_BASE, themeFor,
   OX, OY, WALL, DOOR_HALF, OBX, OBY, ROOM_MOOD, CHAMP_BY_ID,
 } from './consts'
 import { HUB_FLOOR } from './sprites'
@@ -1238,13 +1238,13 @@ export function drawRoom(gm: Game, sx: number, sy: number) {
 
   // 特殊房的地面染色：走进门的第一眼就知道这是什么房间
   const mood = gm.room ? ROOM_MOOD[gm.room.type] : undefined
-  if (mood) {
-    g.fillStyle = mood.floor
-    g.fillRect(ox, oy, ROOM_W, ROOM_H)
-  }
+  const theme = themeFor(gm.depth)
+  // 特殊房用自己的氛围色，普通房用楼层主题色
+  g.fillStyle = mood ? mood.floor : theme.tint
+  g.fillRect(ox, oy, ROOM_W, ROOM_H)
 
   // 墙体
-  g.fillStyle = mood ? mood.wall : '#1a1626'
+  g.fillStyle = mood ? mood.wall : theme.wall
   g.fillRect(ox - WALL, oy - WALL, ROOM_W + WALL * 2, WALL)
   g.fillRect(ox - WALL, oy + ROOM_H, ROOM_W + WALL * 2, WALL)
   g.fillRect(ox - WALL, oy, WALL, ROOM_H)
@@ -1306,7 +1306,8 @@ export function drawHud(gm: Game) {
   g.textAlign = 'left'
   g.fillStyle = '#ffffff'
   g.fillStyle = gm.endless ? '#b98cff' : gm.depth >= FINAL_DEPTH ? '#ff4f6b' : '#ffffff'
-  g.fillText(gm.endless ? `无尽 · 第 ${gm.depth} 层` : `第 ${gm.depth} / ${FINAL_DEPTH} 层`, 4, 14)
+  const th = themeFor(gm.depth)
+  g.fillText(gm.endless ? `无尽 · 第 ${gm.depth} 层 · ${th.name}` : `第 ${gm.depth}/${FINAL_DEPTH} 层 · ${th.name}`, 4, 14)
   // 诅咒计数：接受过的诅咒是持续压力，必须常驻可见
   if (gm.runCurses.length) {
     g.font = '8px monospace'

@@ -52,6 +52,70 @@ export const STATUE = { x: 0, y: 62 }
 export const FORGE_COST = 60
 export type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner' | 'healer' | 'ghost'
 
+/**
+ * 楼层主题。
+ * 原本 6 层之间只有数值递增，走下去没有「换了个地方」的感觉。
+ * 每层给一套专属的兵种构成、地形偏好和配色，旅程才有推进感。
+ */
+export interface FloorTheme {
+  name: string
+  /** 地砖染色（普通房；特殊房仍由 ROOM_MOOD 覆盖） */
+  tint: string
+  wall: string
+  /** 该层可用的地形模板下标，决定这层「长什么样、怎么打」 */
+  layouts: number[]
+  /** 该层的敌人池 */
+  kinds: EnemyKind[]
+  /** 精英变体的额外出现概率 */
+  champBonus: number
+}
+
+export const FLOOR_THEMES: FloorTheme[] = [
+  {
+    name: '地窖', tint: 'rgba(90,110,80,0.08)', wall: '#1e2a1e',
+    layouts: [0, 1, 6],
+    kinds: ['slime', 'bat'],
+    champBonus: 0,
+  },
+  {
+    name: '洞窟', tint: 'rgba(120,95,60,0.10)', wall: '#2e2418',
+    layouts: [1, 2, 4, 6, 7],
+    kinds: ['slime', 'bat', 'skel', 'bomber'],
+    champBonus: 0.02,
+  },
+  {
+    name: '陵墓', tint: 'rgba(80,90,130,0.10)', wall: '#1c2036',
+    layouts: [0, 3, 5, 7],
+    kinds: ['skel', 'bat', 'bomber', 'turret'],
+    champBonus: 0.04,
+  },
+  {
+    name: '熔炉', tint: 'rgba(150,70,40,0.12)', wall: '#3a1c12',
+    layouts: [3, 8, 9],
+    kinds: ['bomber', 'turret', 'skel', 'ghost'],
+    champBonus: 0.06,
+  },
+  {
+    name: '冰窖', tint: 'rgba(90,150,180,0.12)', wall: '#16323c',
+    layouts: [0, 2, 5],
+    kinds: ['ghost', 'healer', 'skel', 'turret', 'summoner'],
+    champBonus: 0.08,
+  },
+  {
+    name: '深渊', tint: 'rgba(110,60,140,0.13)', wall: '#2a163a',
+    layouts: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    kinds: ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner', 'healer', 'ghost'],
+    champBonus: 0.12,
+  },
+]
+
+/** 超过预设主题的层数（无尽模式）循环复用后半段的高强度主题 */
+export function themeFor(depth: number): FloorTheme {
+  if (depth <= FLOOR_THEMES.length) return FLOOR_THEMES[depth - 1]
+  const tail = FLOOR_THEMES.slice(3)
+  return tail[(depth - FLOOR_THEMES.length - 1) % tail.length]
+}
+
 /** 通关层数：打赢第 6 层 Boss 即通关 */
 export const FINAL_DEPTH = 6
 
