@@ -152,6 +152,48 @@ export const RUN_ITEMS: RunItem[] = [
     id: 'godshot', name: '神罚之弹', desc: '穿透+3 追踪+1 伤害+50%，射速 -30%', color: '#ffe9a8', tier: 2,
     apply: s => { s.pierce += 3; s.homing += 1; s.dmg *= 1.5; s.rate *= 0.7 },
   },
+
+  // ---------------- 第二批：补足 build 分支的深度 ----------------
+  {
+    id: 'ricochet', name: '跳弹涂层', desc: '弹射 +2，弹速 +20%', color: '#a8e6a0', tier: 0,
+    apply: s => { s.bounce += 2; s.speed *= 1.2 },
+  },
+  {
+    id: 'heavyround', name: '重型弹头', desc: '伤害 +40%，弹速 -25%', color: '#c9a86b', tier: 0,
+    apply: s => { s.dmg *= 1.4; s.speed *= 0.75 },
+  },
+  {
+    id: 'longbarrel', name: '加长枪管', desc: '射程 +55%，弹速 +25%', color: '#9fdcff', tier: 0,
+    apply: s => { s.range *= 1.55; s.speed *= 1.25 },
+  },
+  {
+    id: 'glasscannon', name: '玻璃大炮', desc: '伤害 +80%，但生命上限 -30', color: '#ff6b9f', tier: 1,
+    apply: s => { s.dmg *= 1.8; s.maxHp -= 30 },
+  },
+  {
+    id: 'berserk', name: '狂战之血', desc: '射速 +50%，受到伤害 +20%', color: '#e05a4f', tier: 1,
+    apply: s => { s.rate *= 1.5; s.armor -= 0.2 },
+  },
+  {
+    id: 'twinorb', name: '双生法球', desc: '环绕法球 +3', color: '#e05be0', tier: 0,
+    apply: s => { s.orbit += 3 },
+  },
+  {
+    id: 'thorns', name: '荆棘护甲', desc: '减伤 +20%，移速 -8%', color: '#7a8a6a', tier: 0,
+    apply: s => { s.armor = Math.min(0.7, s.armor + 0.2); s.moveSpd *= 0.92 },
+  },
+  {
+    id: 'luckycoin', name: '幸运币', desc: '掉落幸运 +18，金币 +25%', color: '#ffd75e', tier: 1,
+    apply: s => { s.luck += 18; s.goldMul *= 1.25 },
+  },
+  {
+    id: 'swarmshot', name: '蜂群弹', desc: '弹数 +3，射程 -25%，伤害 -30%', color: '#c8e65a', tier: 1,
+    apply: s => { s.count += 3; s.range *= 0.75; s.dmg *= 0.7; s.spread += 0.1 },
+  },
+  {
+    id: 'eternity', name: '永恒之核', desc: '穿透+2 弹射+2 射程+40%', color: '#ffe9a8', tier: 2,
+    apply: s => { s.pierce += 2; s.bounce += 2; s.range *= 1.4 },
+  },
 ]
 
 export const ITEM_BY_ID = new Map(RUN_ITEMS.map(i => [i.id, i]))
@@ -220,6 +262,26 @@ export const SYNERGIES: Synergy[] = [
     id: 'singularity', name: '奇点坍缩', desc: '分裂弹自带爆炸',
     color: '#c78cff', requires: ['blackhole', 'split'],
     apply: s => { s.explode += 0.8; s.split += 1 },
+  },
+  {
+    id: 'pinball', name: '弹球机', desc: '跳弹与橡胶弹共鸣，弹射次数翻倍',
+    color: '#a8e6a0', requires: ['ricochet', 'bounce'],
+    apply: s => { s.bounce *= 2; s.speed *= 1.15 },
+  },
+  {
+    id: 'railgun', name: '轨道炮', desc: '重弹配长管，化作贯穿一切的重击',
+    color: '#c9a86b', requires: ['heavyround', 'longbarrel'],
+    apply: s => { s.dmg *= 1.4; s.pierce += 3; s.speed *= 1.5 },
+  },
+  {
+    id: 'deathwish', name: '向死而生', desc: '玻璃大炮配狂战之血，极致输出',
+    color: '#ff4f6b', requires: ['glasscannon', 'berserk'],
+    apply: s => { s.dmg *= 1.5; s.rate *= 1.25; s.vamp += 0.05 },
+  },
+  {
+    id: 'orbstorm', name: '法球风暴', desc: '双生法球与环绕法球叠成球阵',
+    color: '#ff7bff', requires: ['twinorb', 'orbit'],
+    apply: s => { s.orbit += 3 },
   },
 ]
 
@@ -415,7 +477,7 @@ export function rollRunItem(luck = 0, owned: string[] = []): RunItem {
 
   const weights = use.map(i => {
     let w = 1 / (1 + (counts.get(i.id) || 0) * 2) // 第2件权重1/3，第3件1/5……
-    if (completesSynergy(i.id, ownedSet)) w *= 2.5
+    if (completesSynergy(i.id, ownedSet)) w *= 3.4 // 池子扩到 38 件后 2.5 已不足以维持协同触发率
     return w
   })
   const total = weights.reduce((a, b) => a + b, 0)

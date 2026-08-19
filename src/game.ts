@@ -169,8 +169,13 @@ export class Game {
   get goldMul() { return this.stats.goldMul * (1 + this.eq.xp / 100) * this.curses.goldMul }
   get regen() { return this.stats.regen + this.eq.regen }
   get critChance() { return 0.05 + this.stats.crit + this.eq.crit / 100 }
-  /** 伤害减免（上限 70% 防止无敌），再乘上诅咒带来的受伤放大 */
-  get armorMul() { return (1 - Math.min(0.7, this.stats.armor + this.eq.armor / 100)) * this.curses.dmgTaken }
+  /**
+   * 伤害减免。上限 70% 防止无敌；下限 -60% 是因为「狂战之血」这类道具会把减伤压成负数，
+   * 不设下界的话叠几件就会变成受伤翻好几倍，等于被随机掉落废掉这一局。
+   */
+  get armorMul() {
+    return (1 - clamp(this.stats.armor + this.eq.armor / 100, -0.6, 0.7)) * this.curses.dmgTaken
+  }
   /** 弹体颜色随已拾取词条变化，让 build 在视觉上可辨认 */
   get shotColor() {
     const s = this.stats
