@@ -123,8 +123,17 @@ export function themeFor(depth: number): FloorTheme {
  */
 export const DEPTH_HP_BONUS = 12
 
-/** 敌人血量随层数的增长系数（审计后由 0.45 下调，原值导致后期清层要 3~4 分钟） */
+// ---- 后期难度的三条曲线 ----
+// 核心原则：难度靠「致命性」而不是「血条厚度」。
+// 堆血量与数量只会拉长清怪时间（让人烦），堆伤害与速度才会制造压迫感（让人紧张）。
+// 所以血量增长压低、伤害与移速增长拉高。
+
+/** 敌人血量增长（由 0.45 下调：原值让第5层清一层要 233 秒） */
 export const ENEMY_HP_SCALE = 0.34
+/** 敌人伤害增长（由 0.25 上调：原值到第6层玩家还能挨 5.8 下，后期不够致命） */
+export const ENEMY_DMG_SCALE = 0.55
+/** 敌人移速增长：越深越难拉开距离，靠走位躲的窗口被压缩 */
+export const ENEMY_SPD_SCALE = 0.08
 
 /** 通关层数：打赢第 6 层 Boss 即通关 */
 export const FINAL_DEPTH = 6

@@ -24,7 +24,7 @@ import {
   OBX, OBY, CROSS_COL, CROSS_ROW, ROOM_MOOD,
   HUB, PORTAL, STASH, FORGE, STATUE, FORGE_COST,
   FINAL_DEPTH, BOSSES, BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_BASE,
-  CHAMPS, CHAMP_BY_ID, themeFor, DEPTH_HP_BONUS, ENEMY_HP_SCALE,
+  CHAMPS, CHAMP_BY_ID, themeFor, DEPTH_HP_BONUS, ENEMY_HP_SCALE, ENEMY_DMG_SCALE, ENEMY_SPD_SCALE,
 } from './consts'
 import type {
   ObKind, Ob, State, EnemyKind, BossId, BossDef, Enemy, Shot, EProj,
@@ -593,7 +593,7 @@ export class Game {
       const isFinal = this.depth >= FINAL_DEPTH
       const hpScale = (1 + (this.depth - 1) * ENEMY_HP_SCALE) * (isFinal ? 1.6 : 1)
       e.hp = e.maxHp = def.hp * hpScale
-      e.dmg = def.dmg * (1 + (this.depth - 1) * 0.25)
+      e.dmg = def.dmg * (1 + (this.depth - 1) * ENEMY_DMG_SCALE)
       this.boss = e
       sfx.boss()
       this.shake = 1
@@ -1236,12 +1236,13 @@ export class Game {
     const base = ENEMY_BASE[kind]
     // 强度按楼层深度递增（房间制下不再按存活时间）
     const hpScale = 1 + (this.depth - 1) * ENEMY_HP_SCALE
-    const dmgScale = 1 + (this.depth - 1) * 0.25
+    const dmgScale = 1 + (this.depth - 1) * ENEMY_DMG_SCALE
+    const spdScale = 1 + (this.depth - 1) * ENEMY_SPD_SCALE
     const e: Enemy = {
       id: this.eid++, kind,
       x, y,
       hp: base.hp * hpScale, maxHp: base.hp * hpScale,
-      spd: base.spd * rand(0.9, 1.1), dmg: base.dmg * dmgScale,
+      spd: base.spd * rand(0.9, 1.1) * spdScale, dmg: base.dmg * dmgScale,
       r: base.r, xp: base.xp, scale: base.scale, spawnScale: 0, deathT: 0, splits: 0, slow: 0,
       flash: 0, auraCd: 0, orbCd: 0,
       burn: 0, burnT: 0,
