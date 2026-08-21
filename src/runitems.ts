@@ -374,6 +374,8 @@ export const ACTIVES: ActiveItem[] = [
   { id: 'gravity', name: '引力井', desc: '把全场敌人拽向鼠标位置并造成伤害', color: '#b98cff', charge: 3 },
   { id: 'midas', name: '点金手', desc: '将全场敌人的生命转化为金币', color: '#ffd75e', charge: 4 },
   { id: 'clone', name: '影分身', desc: '召唤 3 个分身持续射击 8 秒', color: '#57c7ff', charge: 4 },
+  { id: 'terror', name: '恐惧之嚎', desc: '全场敌人惊逃 4 秒', color: '#b98cff', charge: 3 },
+  { id: 'execute', name: '处决令', desc: '立即处决所有残血敌人', color: '#e6e6f0', charge: 3 },
 ]
 
 export const ACTIVE_BY_ID = new Map(ACTIVES.map(a => [a.id, a]))

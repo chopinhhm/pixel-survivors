@@ -139,7 +139,7 @@ export const ENEMY_SPD_SCALE = 0.08
 export const FINAL_DEPTH = 6
 
 /** Boss 池：每层抽一个，让每次进 Boss 门都不知道会遇到谁 */
-export type BossId = 'demon' | 'ogre' | 'skelking' | 'motherslime'
+export type BossId = 'demon' | 'ogre' | 'skelking' | 'motherslime' | 'swarmqueen' | 'warden'
 export interface BossDef {
   id: BossId; name: string; anim: string; tint?: string
   hp: number; spd: number; dmg: number; r: number; scale: number; draw: number
@@ -149,6 +149,8 @@ export const BOSSES: BossDef[] = [
   { id: 'ogre', name: '狂暴食人魔', anim: 'elite', tint: 'hue-rotate(330deg) saturate(2.2) brightness(1.1)', hp: 780, spd: 34, dmg: 34, r: 13, scale: 2, draw: 2.2 },
   { id: 'skelking', name: '骸骨之王', anim: 'skel', tint: 'hue-rotate(190deg) saturate(2) brightness(1.2)', hp: 700, spd: 26, dmg: 26, r: 12, scale: 2, draw: 2.4 },
   { id: 'motherslime', name: '史莱姆之母', anim: 'slime', tint: 'hue-rotate(70deg) saturate(2.4)', hp: 900, spd: 20, dmg: 24, r: 15, scale: 2, draw: 3 },
+  { id: 'swarmqueen', name: '虫群女王', anim: 'bat', tint: 'hue-rotate(95deg) saturate(2.6) brightness(1.15)', hp: 720, spd: 46, dmg: 26, r: 12, scale: 2, draw: 2.6 },
+  { id: 'warden', name: '石牢守卫', anim: 'elite', tint: 'grayscale(0.7) brightness(1.15)', hp: 950, spd: 22, dmg: 32, r: 14, scale: 2, draw: 2.3 },
 ]
 export const BOSS_BY_ID = new Map(BOSSES.map(b => [b.id, b]))
 
@@ -197,8 +199,10 @@ export interface Enemy {
   burn: number; burnT: number // 炼狱光环的持续燃烧
   bossId: BossId | null // Boss 专属招式分支
   enraged: boolean // Boss 半血狂暴
+  stone: number // 石牢守卫的石化剩余时间（>0 时大幅减伤）
   champ: ChampMod | null // 精英词缀
   atkT: number // 远程攻击冷却（骷髅）
+  windT: number // 攻击前摇剩余时间（>0 时抬手，给玩家反应窗口）
   dashT: number; dashCd: number; dashDx: number; dashDy: number // 小恶魔突进方向
   chargeT: number; chargeCd: number; chargeAng: number // 精英/Boss 冲锋
   specialT: number // Boss 招式计时

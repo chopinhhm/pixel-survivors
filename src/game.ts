@@ -129,6 +129,8 @@ export class Game {
   cloneFire = 0
   /** 全场冻结剩余时间 */
   freezeAll = 0
+  /** 恐惧剩余时间：敌人反向逃离 */
+  fearT = 0
   /** 家园里检测到的未完成存档 */
   pendingRun: RunSave | null = loadRun()
   /** Boss 被击败后出现的通往下一层的地板洞 */
@@ -250,7 +252,7 @@ export class Game {
     this.hitStop = 0; this.hurtFlash = 0
     this.depth = 1
     this.pedestals = []; this.trapdoor = null; this.boss = null
-    this.active = null; this.activeCharge = 0; this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0
+    this.active = null; this.activeCharge = 0; this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0; this.fearT = 0
     this.enemies = []; this.shots = []; this.eprojs = []; this.gems = []; this.hearts = []
     this.chests = []; this.novas = []; this.bolts = []; this.parts = []; this.floats = []
     this.eid = 1
@@ -414,7 +416,7 @@ export class Game {
     this.shake = 0; this.invuln = 0; this.hitStop = 0; this.hurtFlash = 0
     this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
     this.fireT = 0; this.orbAng = 0; this.boltT = 0
-    this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0
+    this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0; this.fearT = 0
     this.eid = 1
     this.win = false; this.newRecord = false
     this.enemies = []; this.shots = []; this.eprojs = []; this.gems = []; this.hearts = []
@@ -993,6 +995,7 @@ export class Game {
 
     this.roomFlash = Math.max(0, this.roomFlash - dt)
     this.freezeAll = Math.max(0, this.freezeAll - dt)
+    this.fearT = Math.max(0, this.fearT - dt)
     // 连击窗口：停手就断
     if (this.combo > 0) {
       this.comboT -= dt
@@ -1192,6 +1195,22 @@ export class Game {
         this.cloneT = 8
         this.float(this.px, this.py - 30, '影分身！', '#57c7ff', 12)
         break
+      case 'terror':
+        this.fearT = 4
+        this.float(this.px, this.py - 30, '恐惧之嚎！', '#b98cff', 12)
+        this.burst(this.px, this.py, '#b98cff', 30)
+        break
+      case 'execute': {
+        // 处决线随层数放宽：后期敌人血厚，固定 30% 会让这个技能形同虚设
+        const thr = 0.3 + Math.min(0.2, this.depth * 0.03)
+        let n = 0
+        for (const e of this.enemies.slice()) {
+          if (e.dead || e.kind === 'boss') continue
+          if (e.hp <= e.maxHp * thr) { this.damage(e, e.hp + 1, false); n++ }
+        }
+        this.float(this.px, this.py - 30, n ? `处决 ${n} 个！` : '无可处决目标', '#e6e6f0', 12)
+        break
+      }
     }
   }
 
@@ -1248,6 +1267,8 @@ export class Game {
       burn: 0, burnT: 0,
       bossId: null,
       enraged: false,
+      stone: 0,
+      windT: 0,
       champ: null,
       atkT: rand(1.5, 3),
       dashT: 0, dashCd: rand(1, 2.5), dashDx: 0, dashDy: 0,
@@ -1318,11 +1339,17 @@ export class Game {
           // 骷髅：保持距离，远程扔骨头
           if (d < 130) {
             e.atkT -= dt
-            if (e.atkT <= 0) {
+            // windT>0 表示正在抬手；抬手期间站定，给玩家反应窗口
+            if (e.windT > 0) {
+              e.windT -= dt
+              spd = 0
+              if (e.windT <= 0) {
+                const sp = 110
+                this.eprojs.push({ x: e.x, y: e.y - 8, vx: (dx / d) * sp, vy: (dy / d) * sp, dmg: e.dmg * 0.6, life: 2.5, r: 3, color: '#e6e6f0' })
+              }
+            } else if (e.atkT <= 0) {
               e.atkT = 2.6
-              const sp = 110
-              this.eprojs.push({ x: e.x, y: e.y - 8, vx: (dx / d) * sp, vy: (dy / d) * sp, dmg: e.dmg * 0.6, life: 2.5, r: 3, color: '#e6e6f0' })
-              this.float(e.x, e.y - 14, '扔骨头！', '#a8a8c0')
+              e.windT = 0.45
             }
             // 保持 90-130 距离：太近后退
             if (d < 85) spd = -e.spd * 0.7
@@ -1362,18 +1389,23 @@ export class Game {
           break
         }
         case 'turret': {
-          // 炮台：不动，周期性放射状齐射
+          // 炮台：不动，蓄力 0.5 秒后放射状齐射。
+          // 前摇是必要的 —— 敌人整体提速后，无预警的八向弹幕会显得不讲理。
           spd = 0
-          e.specialT -= dt
-          if (e.specialT <= 0) {
-            e.specialT = 2.4
-            const n = 8
-            const off = rand(0, Math.PI)
-            for (let i = 0; i < n; i++) {
-              const a = off + (Math.PI * 2 * i) / n
-              this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 95, vy: Math.sin(a) * 95, dmg: e.dmg, life: 2.6, r: 3, color: '#7de37d' })
+          if (e.windT > 0) {
+            e.windT -= dt
+            if (e.windT <= 0) {
+              const n = 8
+              const off = rand(0, Math.PI)
+              for (let i = 0; i < n; i++) {
+                const a = off + (Math.PI * 2 * i) / n
+                this.eprojs.push({ x: e.x, y: e.y, vx: Math.cos(a) * 95, vy: Math.sin(a) * 95, dmg: e.dmg, life: 2.6, r: 3, color: '#7de37d' })
+              }
+              sfx.zap()
             }
-            sfx.zap()
+          } else {
+            e.specialT -= dt
+            if (e.specialT <= 0) { e.specialT = 2.4; e.windT = 0.5 }
           }
           break
         }
@@ -1426,6 +1458,7 @@ export class Game {
           break
         }
         case 'boss': {
+          if (e.stone > 0) e.stone = Math.max(0, e.stone - dt)
           // 半血狂暴：出招更密、移动更快，给 Boss 战一个明确的转折点
           if (!e.enraged && e.hp <= e.maxHp * 0.5) {
             e.enraged = true
@@ -1465,6 +1498,12 @@ export class Game {
         }
       }
 
+      // 恐惧：调头逃离玩家（Boss 免疫，否则会跑出房间边缘卡住）
+      if (this.fearT > 0 && e.kind !== 'boss') {
+        moveX = -moveX; moveY = -moveY
+        spd *= 1.15
+        if (chance(0.12)) this.parts.push({ x: e.x, y: e.y - 8, vx: 0, vy: -12, life: 0.4, maxLife: 0.4, color: '#b98cff', size: 1 })
+      }
       // 诅咒使全体敌人提速
       spd *= this.curses.enemySpd
       // 寒霜减速（时停已在 AI 前提早 continue，这里只处理单体减速）
@@ -1798,6 +1837,8 @@ export class Game {
     let d = dmg
     // 护盾变体：硬性减伤，逼玩家换目标或堆伤害
     if (e.champ === 'shielded') d *= 0.55
+    // 石牢守卫石化期：只能打出零头，必须等窗口
+    if (e.stone > 0) d *= 0.25
     const crit = canCrit && chance(this.critChance)
     if (crit) d *= 2
     e.hp -= d
@@ -2006,6 +2047,33 @@ export class Game {
         }
         for (let i = -2; i <= 2; i++) shoot(base + i * 0.22, 105, e.dmg * 0.5, 5, '#5ac54f')
         sfx.nova()
+        break
+      }
+      case 'swarmqueen': {
+        // 虫群女王：成群召唤小恶魔 + 高速散射，靠数量压迫
+        if (this.enemies.filter(o => !o.dead).length < 26) {
+          for (let i = 0; i < 4; i++) {
+            const a = rand(Math.PI * 2)
+            this.spawnEnemyAt('bat', clamp(e.x + Math.cos(a) * 24, 20, ROOM_W - 20), clamp(e.y + Math.sin(a) * 24, 20, ROOM_H - 20))
+          }
+          this.float(e.x, e.y - 22, '虫群！', '#a8e65a', 10)
+        }
+        for (let i = 0; i < 7; i++) shoot(base + rand(-1.1, 1.1), rand(110, 160), e.dmg * 0.35, 3, '#a8e65a', 2)
+        sfx.zap()
+        break
+      }
+      case 'warden': {
+        // 石牢守卫：交替进入石化态（大幅减伤），逼玩家在窗口期集中输出
+        e.stone = e.stone > 0 ? 0 : 3.2
+        if (e.stone > 0) {
+          this.float(e.x, e.y - 26, '石化！伤害大幅减免', '#c8c8d8', 10)
+          // 石化时抛出一圈缓慢弹幕，防止玩家单纯站桩等待
+          for (let i = 0; i < 14; i++) shoot((Math.PI * 2 * i) / 14, 62, e.dmg * 0.4, 4, '#9aa4c8', 4.5)
+        } else {
+          this.float(e.x, e.y - 26, '石化解除', '#ffd75e', 10)
+          for (let i = -3; i <= 3; i++) shoot(base + i * 0.2, 135, e.dmg * 0.55, 4, '#e6e6f0')
+        }
+        sfx.boom()
         break
       }
       default: {

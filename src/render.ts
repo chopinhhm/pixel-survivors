@@ -988,11 +988,28 @@ export function draw(gm: Game) {
       g.ellipse(W(e.x), H(e.y) + ih / 2 - 3, pr, pr * 0.4, 0, 0, Math.PI * 2)
       g.stroke()
     }
+    // 攻击前摇：抬手期间画收缩的警示圈，玩家据此预判并走位
+    if (!e.dead && e.windT > 0) {
+      const k = 1 - e.windT / 0.5
+      g.strokeStyle = `rgba(255,${Math.round(120 + 100 * k)},80,${0.5 + k * 0.45})`
+      g.lineWidth = 2
+      g.beginPath(); g.arc(W(e.x), H(e.y), (e.r * e.scale + 20) * (1 - k * 0.55), 0, Math.PI * 2); g.stroke()
+      g.lineWidth = 1
+    }
+    // 石化态：灰化并罩一层护罩，明确「现在打不动」
+    if (!e.dead && e.stone > 0) {
+      g.strokeStyle = 'rgba(200,200,216,0.85)'
+      g.lineWidth = 2
+      g.beginPath(); g.arc(W(e.x), H(e.y), e.r * e.scale + 6, 0, Math.PI * 2); g.stroke()
+      g.lineWidth = 1
+      glow(gm, W(e.x), H(e.y), e.r * e.scale + 14, '#c8c8d8', 0.35)
+    }
     if (e.dead) g.filter = 'brightness(5) saturate(0)'
     else if (e.flash > 0) g.filter = 'brightness(4) saturate(0.5)'
     // 自爆怪引信期间剧烈闪烁警示
     else if (e.kind === 'bomber' && e.atkT > 0) g.filter = Math.floor(gm.frameT * 16) % 2 === 0 ? 'brightness(3) saturate(2)' : (ENEMY_TINT.bomber || 'none')
     // 狂暴 Boss 持续泛红脉动，状态一眼可辨
+    else if (e.stone > 0) g.filter = 'grayscale(1) brightness(1.5)'
     else if (e.enraged) g.filter = `brightness(${(1.25 + Math.sin(gm.frameT * 8) * 0.2).toFixed(2)}) saturate(2.4) hue-rotate(330deg)`
     else if (e.bossId && BOSS_BY_ID.get(e.bossId)?.tint) g.filter = BOSS_BY_ID.get(e.bossId)!.tint!
     else if (ENEMY_TINT[e.kind]) g.filter = ENEMY_TINT[e.kind]!
