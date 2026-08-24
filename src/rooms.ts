@@ -1,7 +1,7 @@
 // 楼层生成：以撒式的房间网格
 // 相邻即连通（同以撒），房间内部坐标独立，相机固定不跟随
 
-export type RoomType = 'start' | 'normal' | 'treasure' | 'boss' | 'shop' | 'devil' | 'challenge' | 'angel'
+export type RoomType = 'start' | 'normal' | 'treasure' | 'boss' | 'shop' | 'devil' | 'challenge' | 'angel' | 'vault' | 'sacrifice'
 export type Dir = 'n' | 's' | 'w' | 'e'
 
 export interface RoomDef {
@@ -136,6 +136,16 @@ export function genFloor(depth: number): Floor {
   if (rooms.size >= 9 && Math.random() < 0.45) {
     const ch = deadEnds.find(r => !taken.has(r)) || byFar.find(r => !taken.has(r) && r.type === 'normal')
     if (ch) { ch.type = 'challenge'; taken.add(ch) }
+  }
+  // 宝库：一次性付一大笔金币换三件道具，给攒钱流一个出口
+  if (rooms.size >= 11 && Math.random() < 0.3) {
+    const v = deadEnds.find(r => !taken.has(r)) || byFar.find(r => !taken.has(r) && r.type === 'normal')
+    if (v) { v.type = 'vault'; taken.add(v) }
+  }
+  // 献祭室：可重复用生命换道具，越换越贵
+  if (rooms.size >= 11 && Math.random() < 0.28) {
+    const sc = deadEnds.find(r => !taken.has(r)) || byFar.find(r => !taken.has(r) && r.type === 'normal')
+    if (sc) { sc.type = 'sacrifice'; taken.add(sc) }
   }
 
   return { rooms, startKey, bossKey: boss ? rkey(boss.gx, boss.gy) : startKey, depth }

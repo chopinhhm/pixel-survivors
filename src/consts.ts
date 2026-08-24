@@ -9,6 +9,7 @@ import type { RunItem, ActiveItem, Curse } from './runitems'
 export const ENEMY_DRAW_SCALE: Record<string, number> = {
   slime: 1, bat: 1, skel: 1, elite: 1, boss: 1.6,
   bomber: 1.15, turret: 1.1, summoner: 1.1, healer: 1.1, ghost: 1.2,
+  shieldbearer: 1.5, charger: 1.4, tether: 1.15,
 }
 
 export const VW = 640
@@ -36,6 +37,8 @@ export const ROOM_MOOD: Partial<Record<string, { floor: string; wall: string; vi
   angel: { floor: 'rgba(255,240,200,0.16)', wall: '#6a6248', vignette: 'rgba(30,28,18,0.42)' },
   challenge: { floor: 'rgba(255,159,79,0.13)', wall: '#5a3a1e', vignette: 'rgba(40,20,0,0.5)' },
   boss: { floor: 'rgba(177,62,83,0.10)', wall: '#4a1a24', vignette: 'rgba(35,0,8,0.58)' },
+  vault: { floor: 'rgba(255,200,90,0.16)', wall: '#6a5520', vignette: 'rgba(45,35,0,0.5)' },
+  sacrifice: { floor: 'rgba(140,40,60,0.16)', wall: '#4a1420', vignette: 'rgba(40,0,10,0.6)' },
 }
 
 export type ObKind = 'rock' | 'spike' | 'pit'
@@ -50,7 +53,7 @@ export const STASH = { x: -96, y: 46 }
 export const FORGE = { x: 96, y: 46 }
 export const STATUE = { x: 0, y: 62 }
 export const FORGE_COST = 60
-export type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner' | 'healer' | 'ghost'
+export type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner' | 'healer' | 'ghost' | 'shieldbearer' | 'charger' | 'tether'
 
 /**
  * 楼层主题。
@@ -86,25 +89,25 @@ export const FLOOR_THEMES: FloorTheme[] = [
   {
     name: '陵墓', tint: 'rgba(80,90,130,0.10)', wall: '#1c2036',
     layouts: [0, 3, 5, 7],
-    kinds: ['skel', 'bat', 'bomber', 'turret'],
+    kinds: ['skel', 'bat', 'bomber', 'turret', 'charger'],
     champBonus: 0.04,
   },
   {
     name: '熔炉', tint: 'rgba(150,70,40,0.12)', wall: '#3a1c12',
     layouts: [3, 8, 9],
-    kinds: ['bomber', 'turret', 'skel', 'ghost'],
+    kinds: ['bomber', 'turret', 'skel', 'ghost', 'shieldbearer'],
     champBonus: 0.06,
   },
   {
     name: '冰窖', tint: 'rgba(90,150,180,0.12)', wall: '#16323c',
     layouts: [0, 2, 5],
-    kinds: ['ghost', 'healer', 'skel', 'turret', 'summoner'],
+    kinds: ['ghost', 'healer', 'skel', 'turret', 'summoner', 'tether'],
     champBonus: 0.08,
   },
   {
     name: '深渊', tint: 'rgba(110,60,140,0.13)', wall: '#2a163a',
     layouts: [1, 2, 3, 4, 5, 6, 7, 8, 9],
-    kinds: ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner', 'healer', 'ghost'],
+    kinds: ['slime', 'bat', 'skel', 'bomber', 'turret', 'summoner', 'healer', 'ghost', 'shieldbearer', 'charger', 'tether'],
     champBonus: 0.12,
   },
 ]
@@ -159,6 +162,7 @@ export const ENEMY_ANIM: Record<EnemyKind, string> = {
   slime: 'slime', bat: 'bat', skel: 'skel', elite: 'elite', boss: 'boss',
   bomber: 'bat', turret: 'skel', summoner: 'skel',
   healer: 'slime', ghost: 'bat',
+  shieldbearer: 'elite', charger: 'elite', tether: 'skel',
 }
 export const ENEMY_TINT: Partial<Record<EnemyKind, string>> = {
   bomber: 'hue-rotate(310deg) saturate(2.4) brightness(1.1)',
@@ -166,6 +170,9 @@ export const ENEMY_TINT: Partial<Record<EnemyKind, string>> = {
   summoner: 'hue-rotate(240deg) saturate(2.2)',
   healer: 'hue-rotate(180deg) saturate(2.6) brightness(1.25)',
   ghost: 'hue-rotate(200deg) saturate(0.3) brightness(1.6)',
+  shieldbearer: 'hue-rotate(200deg) saturate(1.6) brightness(0.9)',
+  charger: 'hue-rotate(20deg) saturate(2.2) brightness(1.1)',
+  tether: 'hue-rotate(280deg) saturate(2.4)',
 }
 
 /**
@@ -249,4 +256,7 @@ export const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: numbe
   summoner: { hp: 48, spd: 26, dmg: 12, r: 6, xp: 5, scale: 1.1 },
   healer: { hp: 40, spd: 30, dmg: 8, r: 6, xp: 5, scale: 1.1 },
   ghost: { hp: 30, spd: 30, dmg: 16, r: 6, xp: 4, scale: 1.1 },
+  shieldbearer: { hp: 70, spd: 24, dmg: 18, r: 8, xp: 6, scale: 1.4 },
+  charger: { hp: 45, spd: 36, dmg: 24, r: 7, xp: 5, scale: 1.3 },
+  tether: { hp: 42, spd: 18, dmg: 10, r: 6, xp: 5, scale: 1.1 },
 }

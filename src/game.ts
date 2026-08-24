@@ -99,6 +99,7 @@ export class Game {
   fireT = 0
   orbAng = 0
   boltT = 0
+  teslaT = 0
 
   enemies: Enemy[] = []
   shots: Shot[] = []
@@ -244,7 +245,7 @@ export class Game {
     this.challengeActive = false
     this.challengeWave = 0
     this.combo = 0; this.comboT = 0; this.comboBest = 0
-    this.fireT = 0; this.orbAng = 0; this.boltT = 0
+    this.fireT = 0; this.orbAng = 0; this.boltT = 0; this.teslaT = 0
     this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
     this.runLoot = []; this.runGold = this.runChar.startGold
@@ -415,7 +416,7 @@ export class Game {
     // 重置瞬时状态
     this.shake = 0; this.invuln = 0; this.hitStop = 0; this.hurtFlash = 0
     this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
-    this.fireT = 0; this.orbAng = 0; this.boltT = 0
+    this.fireT = 0; this.orbAng = 0; this.boltT = 0; this.teslaT = 0
     this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0; this.fearT = 0
     this.eid = 1
     this.win = false; this.newRecord = false
@@ -570,7 +571,8 @@ export class Game {
   /** 首次进入房间时生成内容 */
   populateRoom(r: RoomDef) {
     // 起始房与各类特殊房都是安全区，不刷怪
-    if (r.type === 'start' || r.type === 'treasure' || r.type === 'shop' || r.type === 'devil' || r.type === 'angel') {
+    if (r.type === 'start' || r.type === 'treasure' || r.type === 'shop' || r.type === 'devil'
+      || r.type === 'angel' || r.type === 'vault' || r.type === 'sacrifice') {
       r.cleared = true
       return
     }
@@ -671,6 +673,23 @@ export class Game {
         item: rollRunItem(luck + 60, this.runItems), act: null,
         price: 0, kind: 'free' as const, taken: false,
       }]
+    }
+    if (r.type === 'vault') {
+      // 宝库：三件一口价，给「攒钱不花」的玩家一个爆发出口
+      const price = 90 + this.depth * 22
+      return [0, 1, 2].map(i => ({
+        x: ROOM_W / 2 + (i - 1) * 110, y: cy,
+        item: rollRunItem(luck + 40, this.runItems), act: null,
+        price, kind: 'gold' as const, taken: false,
+      }))
+    }
+    if (r.type === 'sacrifice') {
+      // 献祭室：三座祭坛价格递增，越贪越危险
+      return [0, 1, 2].map(i => ({
+        x: ROOM_W / 2 + (i - 1) * 110, y: cy,
+        item: rollRunItem(luck + 30 + i * 30, this.runItems), act: null,
+        price: 14 + i * 12 + this.depth * 2, kind: 'hp' as const, taken: false,
+      }))
     }
     // 普通房有概率出现诅咒祭坛：接受一条永久诅咒，换一件高稀有度道具
     if (r.type === 'normal' && chance(0.2)) {
@@ -883,7 +902,7 @@ export class Game {
     if (this.dashT <= 0 && this.dashCd <= 0 && this.dashBuf > 0) {
       this.dashBuf = 0
       this.dashT = 0.18
-      this.dashCd = 2.2
+      this.dashCd = 2.2 * this.stats.dashCdMul
       this.dashX = this.moving ? mdx : this.face
       this.dashY = this.moving ? mdy : 0
       this.invuln = Math.max(this.invuln, 0.32)
@@ -1042,6 +1061,7 @@ export class Game {
     this.rebuildGrid()
     this.separateEnemies()
     this.updateWeapons(dt)
+    this.updateFieldEffects(dt)
     this.updateShots(dt)
     this.updateEProjs(dt)
     this.updateNovas(dt)
@@ -1457,6 +1477,43 @@ export class Game {
           }
           break
         }
+        case 'shieldbearer': {
+          // 盾卫：正面减伤，必须绕后。始终面朝玩家，逼你转场而不是站桩
+          e.chargeAng = Math.atan2(dy, dx)
+          spd = e.spd * 0.85
+          break
+        }
+        case 'charger': {
+          // 冲锋兵：普通怪里的冲锋单位，蓄力短、频率高，制造持续位移压力
+          e.chargeCd -= dt
+          if (e.chargeT > 0) {
+            e.chargeT -= dt
+            if (e.chargeT < 0.45) { moveX = Math.cos(e.chargeAng); moveY = Math.sin(e.chargeAng); spd = 190 }
+            else spd = 0
+            if (e.chargeT <= 0) e.chargeCd = 2.4
+          } else if (e.chargeCd <= 0 && d < 200) {
+            e.chargeT = 0.75
+            e.chargeAng = Math.atan2(dy, dx)
+            e.windT = 0.3
+          }
+          break
+        }
+        case 'tether': {
+          // 缚灵：不追人，而是把玩家往自己身边拽，破坏走位
+          spd = e.spd * 0.5
+          e.specialT -= dt
+          if (d < 190) {
+            const pull = 26 * dt
+            this.px -= (dx / d) * pull
+            this.py -= (dy / d) * pull
+            if (chance(0.35)) {
+              this.parts.push({ x: this.px + rand(-6, 6), y: this.py + rand(-6, 6),
+                vx: (e.x - this.px) * 0.6, vy: (e.y - this.py) * 0.6,
+                life: 0.35, maxLife: 0.35, color: '#b98cff', size: 1 })
+            }
+          }
+          break
+        }
         case 'boss': {
           if (e.stone > 0) e.stone = Math.max(0, e.stone - dt)
           // 半血狂暴：出招更密、移动更快，给 Boss 战一个明确的转折点
@@ -1804,6 +1861,7 @@ export class Game {
         this.shake = 0.4
         this.hurtFlash = 1
         this.hitStop = 0.06
+        this.doRetaliate()
         sfx.hurt()
         this.float(this.px, this.py - 12, `-${Math.round(p.dmg)}`, '#ff4f6b', 9)
       }
@@ -1839,8 +1897,14 @@ export class Game {
     if (e.champ === 'shielded') d *= 0.55
     // 石牢守卫石化期：只能打出零头，必须等窗口
     if (e.stone > 0) d *= 0.25
+    // 盾卫：正面来的伤害被大幅挡下，绕到侧后才打得动
+    if (e.kind === 'shieldbearer') {
+      const toPlayer = Math.atan2(this.py - e.y, this.px - e.x)
+      let diff = Math.abs(((toPlayer - e.chargeAng + Math.PI * 3) % (Math.PI * 2)) - Math.PI)
+      if (diff > Math.PI / 2) d *= 0.3
+    }
     const crit = canCrit && chance(this.critChance)
-    if (crit) d *= 2
+    if (crit) d *= this.stats.critMul
     e.hp -= d
     e.flash = crit ? 0.14 : 0.08
     if (crit) {
@@ -1868,10 +1932,17 @@ export class Game {
       this.gainCoin(bonus)
       this.float(this.px, this.py - 40, `${this.combo} 连击！+${bonus}`, '#ffd75e', 11)
     }
+    // 连锁死亡：击杀时原地引爆，配合爆裂弹会形成连环
+    if (this.stats.killBlast > 0 && e.kind !== 'boss') {
+      this.novas.push({ x: e.x, y: e.y, r: 4, maxR: 34 + this.stats.killBlast * 18,
+        dmg: 26 * this.stats.dmg * this.stats.killBlast, hit: new Set() })
+      this.burst(e.x, e.y, '#ff9f4f', 8)
+    }
     const colors: Record<EnemyKind, string> = {
       slime: '#5ac54f', bat: '#7b5be0', skel: '#e6e6f0', elite: '#e05a4f', boss: '#b13e53',
       bomber: '#ff7f3f', turret: '#7de37d', summoner: '#b98cff',
       healer: '#57e6ff', ghost: '#cfe8ff',
+      shieldbearer: '#57c7ff', charger: '#ff9f4f', tether: '#b98cff',
     }
     this.burst(e.x, e.y, colors[e.kind], e.kind === 'boss' ? 45 : e.kind === 'elite' ? 22 : 9)
     // 金币与装备掉落
@@ -2126,6 +2197,47 @@ export class Game {
     this.kill(e)
   }
 
+  /** 受击反制：对周围敌人造成一圈伤害 */
+  doRetaliate() {
+    const r = this.stats.retaliate
+    if (r <= 0) return
+    this.novas.push({ x: this.px, y: this.py, r: 6, maxR: 70, dmg: r * this.stats.dmg, hit: new Set() })
+    this.burst(this.px, this.py, '#e6e6f0', 16)
+  }
+
+  /** 磁暴线圈与荆棘领域：不依赖开火的持续输出 */
+  updateFieldEffects(dt: number) {
+    const st = this.stats
+    if (st.tesla > 0) {
+      this.teslaT -= dt
+      if (this.teslaT <= 0) {
+        this.teslaT = 1.1
+        const target = this.nearestTo(this.px, this.py, 130)
+        if (target) {
+          this.bolts.push({ pts: [this.px, this.py, target.x, target.y], life: 0.14 })
+          this.damage(target, st.tesla * st.dmg)
+          // 顺带电到目标周围的敌人
+          this.forEachNear(target.x, target.y, 46, o => {
+            if (o !== target && dist2(o.x, o.y, target.x, target.y) < 46 * 46) {
+              this.damage(o, st.tesla * st.dmg * 0.5)
+            }
+          })
+          sfx.zap()
+        }
+      }
+    }
+    if (st.thornsAura > 0) {
+      const rad = 30
+      this.forEachNear(this.px, this.py, rad + 12, e => {
+        if (e.auraCd > 0) return
+        if (dist2(this.px, this.py, e.x, e.y) < (rad + e.r) ** 2) {
+          e.auraCd = 0.4
+          this.damage(e, st.thornsAura * st.dmg * 0.4)
+        }
+      })
+    }
+  }
+
   /** 掉落装备到本局战利品；背包满了也照收，结算时再按容量并入 */
   dropLoot(x: number, y: number, n: number, luck: number) {
     for (let i = 0; i < n; i++) {
@@ -2156,6 +2268,7 @@ export class Game {
       this.shake = 0.5
       this.hurtFlash = 1
       this.hitStop = 0.07 // 受击顿帧，强化"被打到"的实感
+      this.doRetaliate()
       sfx.hurt()
       this.float(this.px, this.py - 12, `-${Math.round(h.dmg)}`, '#ff4f6b', 9)
     }

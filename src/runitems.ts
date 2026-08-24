@@ -32,6 +32,13 @@ export interface RunStats {
   magnet: number   // 拾取范围倍率
   goldMul: number  // 金币倍率
   luck: number     // 掉落幸运
+  // ---- 第三批新增的机制位 ----
+  critMul: number      // 暴击倍率（基础 2 倍）
+  dashCdMul: number    // 冲刺冷却倍率（越小越快）
+  retaliate: number    // 受击反伤：对周围造成的伤害
+  killBlast: number    // 击杀爆炸伤害系数（0 = 无）
+  tesla: number        // 周期性电击附近敌人的伤害
+  thornsAura: number   // 接触伤害：贴身的敌人持续掉血
 }
 
 export function baseStats(): RunStats {
@@ -41,6 +48,7 @@ export function baseStats(): RunStats {
     explode: 0, burn: 0, chain: 0, split: 0, freeze: 0, vamp: 0,
     orbit: 0, aura: 0, bolt: 0,
     crit: 0, moveSpd: 1, maxHp: 0, regen: 0, armor: 0, magnet: 1, goldMul: 1, luck: 0,
+    critMul: 2, dashCdMul: 1, retaliate: 0, killBlast: 0, tesla: 0, thornsAura: 0,
   }
 }
 
@@ -194,6 +202,42 @@ export const RUN_ITEMS: RunItem[] = [
     id: 'eternity', name: '永恒之核', desc: '穿透+2 弹射+2 射程+40%', color: '#ffe9a8', tier: 2,
     apply: s => { s.pierce += 2; s.bounce += 2; s.range *= 1.4 },
   },
+
+  // ---------------- 第三批：引入不依赖「开火」的新机制 ----------------
+  // 前两批全部围绕子弹做文章，堆到后面只是数字变大。
+  // 这批给出受击反制、击杀连锁、贴身领域等新维度，让 build 有真正不同的玩法。
+  {
+    id: 'precision', name: '精准瞄具', desc: '暴击伤害 2.0x → 2.8x', color: '#ffd75e', tier: 1,
+    apply: s => { s.critMul += 0.8 },
+  },
+  {
+    id: 'nimble', name: '灵巧靴', desc: '冲刺冷却 -35%', color: '#57c7ff', tier: 0,
+    apply: s => { s.dashCdMul *= 0.65 },
+  },
+  {
+    id: 'retaliate', name: '反击尖刺', desc: '受击时对周围造成伤害', color: '#e6e6f0', tier: 0,
+    apply: s => { s.retaliate += 45 },
+  },
+  {
+    id: 'killblast', name: '连锁死亡', desc: '击杀敌人时引发爆炸', color: '#ff7f3f', tier: 1,
+    apply: s => { s.killBlast += 0.8 },
+  },
+  {
+    id: 'tesla', name: '磁暴线圈', desc: '周期性电击附近敌人', color: '#9fdcff', tier: 0,
+    apply: s => { s.tesla += 16 },
+  },
+  {
+    id: 'thornsaura', name: '荆棘领域', desc: '贴身的敌人持续掉血', color: '#7a8a6a', tier: 0,
+    apply: s => { s.thornsAura += 20 },
+  },
+  {
+    id: 'assassin', name: '刺客手套', desc: '暴击率 +10%，暴击伤害 +0.6x', color: '#b13e53', tier: 1,
+    apply: s => { s.crit += 0.1; s.critMul += 0.6 },
+  },
+  {
+    id: 'reaper', name: '死神镰刀', desc: '击杀爆炸大幅增强，暴击伤害 +1.0x', color: '#c78cff', tier: 2,
+    apply: s => { s.killBlast += 1.4; s.critMul += 1.0 },
+  },
 ]
 
 export const ITEM_BY_ID = new Map(RUN_ITEMS.map(i => [i.id, i]))
@@ -282,6 +326,26 @@ export const SYNERGIES: Synergy[] = [
     id: 'orbstorm', name: '法球风暴', desc: '双生法球与环绕法球叠成球阵',
     color: '#ff7bff', requires: ['twinorb', 'orbit'],
     apply: s => { s.orbit += 3 },
+  },
+  {
+    id: 'chainreaction', name: '连锁反应', desc: '击杀爆炸引燃周围，形成连环爆',
+    color: '#ff5a28', requires: ['killblast', 'explode'],
+    apply: s => { s.killBlast += 1.0; s.explode += 0.5 },
+  },
+  {
+    id: 'stormfield', name: '风暴领域', desc: '磁暴与荆棘共振，贴身即致命',
+    color: '#9fdcff', requires: ['tesla', 'thornsaura'],
+    apply: s => { s.tesla *= 2; s.thornsAura *= 2 },
+  },
+  {
+    id: 'phantom', name: '幻影步', desc: '灵巧靴与疾风之靴共鸣，冲刺近乎无冷却',
+    color: '#57e6a0', requires: ['nimble', 'boots'],
+    apply: s => { s.dashCdMul *= 0.55; s.moveSpd *= 1.12 },
+  },
+  {
+    id: 'executioner', name: '处刑人', desc: '精准与刺客叠加，暴击成为主要输出',
+    color: '#ffd75e', requires: ['precision', 'assassin'],
+    apply: s => { s.critMul += 1.2; s.crit += 0.12 },
   },
 ]
 
