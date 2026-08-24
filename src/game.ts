@@ -16,19 +16,21 @@ import {
 import { makeEmblem } from './sprites'
 import { CHARS, CharDef, getChar } from './chars'
 import { ACHIEVEMENTS, newlyEarned } from './achievements'
+import { SECONDARIES, SecondaryDef, getSecondary } from './weapons'
 import * as R from './render'
 
 // 常量与类型集中在 consts.ts，避免 render.ts 反向依赖 game.ts 造成运行时循环
 import {
   ENEMY_DRAW_SCALE, VW, VH, ROOM_W, ROOM_H, OX, OY, DOOR_HALF, WALL,
   OBX, OBY, CROSS_COL, CROSS_ROW, ROOM_MOOD,
-  HUB, PORTAL, STASH, FORGE, STATUE, FORGE_COST,
+  HUB, PORTAL, STASH, FORGE, STATUE, ARMORY, FORGE_COST,
   FINAL_DEPTH, BOSSES, BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_BASE,
   CHAMPS, CHAMP_BY_ID, themeFor, DEPTH_HP_BONUS, ENEMY_HP_SCALE, ENEMY_DMG_SCALE, ENEMY_SPD_SCALE,
 } from './consts'
 import type {
   ObKind, Ob, State, EnemyKind, BossId, BossDef, Enemy, Shot, EProj,
   Gem, Heart, Particle, FloatText, Nova, Bolt, Chest, Pedestal, ChampMod,
+  Grenade, Mine, Beam, Boomer,
 } from './consts'
 
 // main.ts 依赖这两个尺寸，从这里转出去，避免改动调用方
@@ -100,6 +102,13 @@ export class Game {
   orbAng = 0
   boltT = 0
   teslaT = 0
+  // ---- 副武器 ----
+  secondary: SecondaryDef = getSecondary(this.profile.secondary)
+  secT = 0
+  grenades: Grenade[] = []
+  mines: Mine[] = []
+  beams: Beam[] = []
+  boomers: Boomer[] = []
 
   enemies: Enemy[] = []
   shots: Shot[] = []
@@ -246,6 +255,8 @@ export class Game {
     this.challengeWave = 0
     this.combo = 0; this.comboT = 0; this.comboBest = 0
     this.fireT = 0; this.orbAng = 0; this.boltT = 0; this.teslaT = 0
+    this.secondary = getSecondary(this.profile.secondary); this.secT = 0
+    this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
     this.runLoot = []; this.runGold = this.runChar.startGold
@@ -281,6 +292,7 @@ export class Game {
     // 换房清场：残留弹体会打到下一间，属于串味
     this.enemies = []; this.shots = []; this.eprojs = []
     this.novas = []; this.bolts = []
+    this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.gems = []; this.hearts = []; this.chests = []
     this.grid.clear()
     this.boss = null
@@ -322,6 +334,7 @@ export class Game {
     const snap: RunSave = {
       v: RUN_SAVE_VER,
       charId: this.runChar.id,
+      secId: this.secondary.id,
       depth: this.depth,
       curKey: this.curKey,
       startKey: this.floor.startKey,
@@ -377,6 +390,7 @@ export class Game {
     // 玩家可能在家园换过装备，直接沿用会和其他属性口径不一致。
     // 但只抬上限不回血，避免"退出换装再进来"变成回血手段。
     this.runChar = getChar(s.charId)
+    this.secondary = getSecondary(s.secId)
     this.maxHp = this.computeMaxHp()
     this.hp = clamp(s.hp, 1, this.maxHp)
     this.active = s.activeId ? (ACTIVE_BY_ID.get(s.activeId) ?? null) : null
@@ -417,6 +431,8 @@ export class Game {
     this.shake = 0; this.invuln = 0; this.hitStop = 0; this.hurtFlash = 0
     this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
     this.fireT = 0; this.orbAng = 0; this.boltT = 0; this.teslaT = 0
+    this.secondary = getSecondary(this.profile.secondary); this.secT = 0
+    this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0; this.fearT = 0
     this.eid = 1
     this.win = false; this.newRecord = false
@@ -864,6 +880,9 @@ export class Game {
       case 'charselect':
         this.updateCharSelect()
         break
+      case 'armory':
+        this.updateArmory()
+        break
       case 'victory':
         this.updateVictory()
         break
@@ -959,6 +978,7 @@ export class Game {
     const nearStash = dist2(this.px, this.py, STASH.x, STASH.y) < 24 * 24
     const nearForge = dist2(this.px, this.py, FORGE.x, FORGE.y) < 24 * 24
     const nearStatue = dist2(this.px, this.py, STATUE.x, STATUE.y) < 24 * 24
+    const nearArmory = dist2(this.px, this.py, ARMORY.x, ARMORY.y) < 24 * 24
 
     // 传送门粒子
     if (chance(0.5)) {
@@ -972,8 +992,10 @@ export class Game {
 
     if (Input.pressed('i')) { this.state = 'inventory'; return }
     if (Input.pressed('c')) { this.state = 'charselect'; return }
+    if (Input.pressed('v')) { this.state = 'armory'; return }
     if (Input.pressed('e')) {
       if (nearStatue) { this.state = 'charselect'; return }
+      if (nearArmory) { this.state = 'armory'; return }
       if (nearPortal) {
         // 有未完成的存档就接着打，否则开新的一局
         if (this.pendingRun) {
@@ -1061,6 +1083,7 @@ export class Game {
     this.rebuildGrid()
     this.separateEnemies()
     this.updateWeapons(dt)
+    this.updateSecondary(dt)
     this.updateFieldEffects(dt)
     this.updateShots(dt)
     this.updateEProjs(dt)
@@ -2197,6 +2220,170 @@ export class Game {
     this.kill(e)
   }
 
+  // ================================================================
+  // 副武器：右键释放，独立冷却，不吃主武器的射速加成
+  // ================================================================
+  updateSecondary(dt: number) {
+    this.secT = Math.max(0, this.secT - dt)
+    const w = this.secondary
+    if (Input.rdown && this.secT <= 0) {
+      this.secT = w.cd
+      this.fireSecondary(w)
+    }
+    this.updateGrenades(dt)
+    this.updateMines(dt)
+    this.updateBoomers(dt)
+    for (const b of this.beams) b.life -= dt
+    this.beams = this.beams.filter(b => b.life > 0)
+  }
+
+  fireSecondary(w: SecondaryDef) {
+    const st = this.stats
+    const dmg = 9 * w.dmg * st.dmg
+    const a = this.aimAngle
+    switch (w.id) {
+      case 'shotgun': {
+        // 近距离扇形：单发弱但发数多，贴脸时全中
+        for (let i = 0; i < 9; i++) {
+          const sa = a + rand(-0.42, 0.42)
+          this.shots.push({
+            x: this.px, y: this.py,
+            vx: Math.cos(sa) * 300, vy: Math.sin(sa) * 300,
+            dmg: dmg / 3, life: 0.32, pierce: st.pierce, bounce: 0, split: 0,
+            size: 3, hit: new Set(), targetId: -1,
+          })
+        }
+        this.shake = 0.35
+        sfx.shoot()
+        break
+      }
+      case 'beamgun': {
+        // 瞬发贯穿：沿射线一次性结算，无视地形
+        const len = 460
+        const x2 = this.px + Math.cos(a) * len, y2 = this.py + Math.sin(a) * len
+        this.beams.push({ x1: this.px, y1: this.py, x2, y2, life: 0.18, color: w.color })
+        for (const e of this.enemies.slice()) {
+          if (e.dead) continue
+          // 点到线段距离
+          const dx = x2 - this.px, dy = y2 - this.py
+          const t = clamp(((e.x - this.px) * dx + (e.y - this.py) * dy) / (dx * dx + dy * dy), 0, 1)
+          const cx = this.px + dx * t, cy = this.py + dy * t
+          if (dist2(e.x, e.y, cx, cy) < (10 + e.r) ** 2) this.damage(e, dmg)
+        }
+        this.shake = 0.4
+        this.hitStop = 0.05
+        sfx.zap()
+        break
+      }
+      case 'grenade': {
+        const tx = clamp(this.aimX, 12, ROOM_W - 12), ty = clamp(this.aimY, 12, ROOM_H - 12)
+        const d = Math.max(1, Math.hypot(tx - this.px, ty - this.py))
+        const fly = clamp(d / 260, 0.25, 1.1)
+        this.grenades.push({
+          x: this.px, y: this.py,
+          vx: (tx - this.px) / fly, vy: (ty - this.py) / fly,
+          fuse: fly, dmg, radius: 62,
+        })
+        sfx.shoot()
+        break
+      }
+      case 'boomerang': {
+        this.boomers.push({
+          x: this.px, y: this.py,
+          vx: Math.cos(a) * 250, vy: Math.sin(a) * 250,
+          t: 0, out: 0.45, back: false, dmg, hit: new Set(), ang: 0,
+        })
+        sfx.shoot()
+        break
+      }
+      case 'mine': {
+        if (this.mines.length < 8) {
+          this.mines.push({ x: this.px, y: this.py, arm: 0.4, dmg, radius: 58 })
+          this.float(this.px, this.py + 12, '布雷', w.color, 8)
+        }
+        break
+      }
+      case 'shockwave': {
+        this.novas.push({ x: this.px, y: this.py, r: 8, maxR: 108, dmg, hit: new Set() })
+        this.forEachNear(this.px, this.py, 110, e => {
+          const d = Math.sqrt(dist2(e.x, e.y, this.px, this.py)) || 1
+          if (d < 110 && e.kind !== 'boss') {
+            e.x += ((e.x - this.px) / d) * 26
+            e.y += ((e.y - this.py) / d) * 26
+          }
+        })
+        this.shake = 0.55
+        this.hitStop = 0.06
+        sfx.nova()
+        break
+      }
+    }
+  }
+
+  updateGrenades(dt: number) {
+    for (const g of this.grenades) {
+      g.fuse -= dt
+      if (g.fuse > 0) {
+        g.x += g.vx * dt
+        g.y += g.vy * dt
+        g.x = clamp(g.x, 6, ROOM_W - 6)
+        g.y = clamp(g.y, 6, ROOM_H - 6)
+        if (chance(0.6)) this.parts.push({ x: g.x, y: g.y, vx: 0, vy: 0, life: 0.25, maxLife: 0.25, color: '#7de37d', size: 1 })
+      } else {
+        this.novas.push({ x: g.x, y: g.y, r: 5, maxR: g.radius, dmg: g.dmg, hit: new Set() })
+        this.burst(g.x, g.y, '#ff9f4f', 22)
+        this.shake = 0.5
+        sfx.boom()
+      }
+    }
+    this.grenades = this.grenades.filter(g => g.fuse > 0)
+  }
+
+  updateMines(dt: number) {
+    for (const m of this.mines) {
+      if (m.arm > 0) { m.arm -= dt; continue }
+      let trig = false
+      this.forEachNear(m.x, m.y, 30, e => {
+        if (!trig && dist2(e.x, e.y, m.x, m.y) < 26 * 26) trig = true
+      })
+      if (trig) {
+        this.novas.push({ x: m.x, y: m.y, r: 5, maxR: m.radius, dmg: m.dmg, hit: new Set() })
+        this.burst(m.x, m.y, '#e05a4f', 20)
+        this.shake = 0.45
+        sfx.boom()
+        m.arm = -999 // 标记已引爆
+      }
+    }
+    this.mines = this.mines.filter(m => m.arm > -900)
+  }
+
+  /** 回旋刃：飞出后折返，去回两趟都能命中 */
+  updateBoomers(dt: number) {
+    for (const b of this.boomers) {
+      b.t += dt
+      b.ang += dt * 20
+      if (!b.back) {
+        b.x += b.vx * dt
+        b.y += b.vy * dt
+        if (b.t >= b.out) { b.back = true; b.hit.clear() }
+      } else {
+        const dx = this.px - b.x, dy = this.py - b.y
+        const d = Math.hypot(dx, dy) || 1
+        b.x += (dx / d) * 300 * dt
+        b.y += (dy / d) * 300 * dt
+        if (d < 10) b.t = 999
+      }
+      this.forEachNear(b.x, b.y, 14, e => {
+        if (b.hit.has(e.id) || e.dead) return
+        if (dist2(b.x, b.y, e.x, e.y) < (8 + e.r) ** 2) {
+          b.hit.add(e.id)
+          this.damage(e, b.dmg)
+        }
+      })
+    }
+    this.boomers = this.boomers.filter(b => b.t < 6)
+  }
+
   /** 受击反制：对周围敌人造成一圈伤害 */
   doRetaliate() {
     const r = this.stats.retaliate
@@ -2443,6 +2630,46 @@ export class Game {
     }
   }
 
+
+  // ================================================================
+  // 军械库：购买与切换副武器
+  // ================================================================
+  armoryRects(): { x: number; y: number; w: number; h: number }[] {
+    const cw = 96, ch = 116, gap = 10
+    const total = cw * SECONDARIES.length + gap * (SECONDARIES.length - 1)
+    const x0 = (VW - total) / 2
+    const y = (VH - ch) / 2 + 6
+    return SECONDARIES.map((_, i) => ({ x: x0 + i * (cw + gap), y, w: cw, h: ch }))
+  }
+
+  updateArmory() {
+    if (Input.pressed('escape') || Input.pressed('v')) { this.state = 'hub'; return }
+    if (!Input.mclick) return
+    const rects = this.armoryRects()
+    for (let i = 0; i < SECONDARIES.length; i++) {
+      const r = rects[i]
+      if (Input.mx < r.x || Input.mx > r.x + r.w || Input.my < r.y || Input.my > r.y + r.h) continue
+      const w = SECONDARIES[i]
+      const owned = this.profile.secondaries.includes(w.id)
+      if (owned) {
+        this.profile.secondary = w.id
+        this.secondary = w
+        saveProfile(this.profile)
+        sfx.pickup()
+      } else if (this.profile.gold >= w.cost) {
+        this.profile.gold -= w.cost
+        this.profile.secondaries.push(w.id)
+        this.profile.secondary = w.id
+        this.secondary = w
+        saveProfile(this.profile)
+        sfx.levelup()
+      } else {
+        this.hubSay(`金币不足（需要 ${w.cost}）`)
+        sfx.hurt()
+      }
+      return
+    }
+  }
 
   // ---------- 特效 ----------
   burst(x: number, y: number, color: string, n: number) {

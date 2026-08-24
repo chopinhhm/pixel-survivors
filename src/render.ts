@@ -3,6 +3,7 @@
 // 不修改任何模拟状态（updateInventory 等交互逻辑仍留在 Game 内）。
 // 通过 import type 引用 Game，编译后类型被抹除，因此不构成运行时循环依赖。
 import type { Game } from './game'
+import { SECONDARIES } from './weapons'
 import type { EnemyKind, Ob } from './consts'
 import { OB_CELL } from './layouts'
 import { SPR, FLOOR, makeEmblem } from './sprites'
@@ -19,7 +20,7 @@ import { ACHIEVEMENTS } from './achievements'
 import { getChar } from './chars'
 import {
   VW, VH, ROOM_W, ROOM_H, FINAL_DEPTH,
-  HUB, PORTAL, STASH, FORGE, STATUE, FORGE_COST,
+  HUB, PORTAL, STASH, FORGE, STATUE, ARMORY, FORGE_COST,
   BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_DRAW_SCALE, ENEMY_BASE, themeFor,
   OX, OY, WALL, DOOR_HALF, OBX, OBY, ROOM_MOOD, CHAMP_BY_ID,
 } from './consts'
@@ -611,6 +612,15 @@ export function drawHub(gm: Game) {
   }
   g.globalAlpha = 1
 
+  // ---- 军械库 ----
+  shadow(gm, W(ARMORY.x), H(ARMORY.y) + 8, 9)
+  glow(gm, W(ARMORY.x), H(ARMORY.y), 14, gm.secondary.color, 0.35)
+  g.fillStyle = '#2a2f4a'
+  g.fillRect(Math.round(W(ARMORY.x) - 10), Math.round(H(ARMORY.y) - 8), 20, 16)
+  g.fillStyle = gm.secondary.color
+  g.fillRect(Math.round(W(ARMORY.x) - 6), Math.round(H(ARMORY.y) - 4), 12, 3)
+  g.fillRect(Math.round(W(ARMORY.x) - 6), Math.round(H(ARMORY.y) + 2), 12, 3)
+
   // ---- 角色雕像（选择角色）----
   shadow(gm, W(STATUE.x), H(STATUE.y) + 8, 9)
   glow(gm, W(STATUE.x), H(STATUE.y) - 2, 14, gm.runChar.color, 0.35)
@@ -651,6 +661,8 @@ export function drawHub(gm: Game) {
   label(STASH.x, STASH.y - 18, '储物箱 · 背包', nearStash, '#57c7ff')
   label(FORGE.x, FORGE.y - 18, `熔炉 · 锻造(${FORGE_COST}金)`, nearForge, '#ff9f4f')
   label(STATUE.x, STATUE.y - 22, `雕像 · 角色(${gm.runChar.name})`, nearStatue, gm.runChar.color)
+  const nearArmory = dist2(gm.px, gm.py, ARMORY.x, ARMORY.y) < 24 * 24
+  label(ARMORY.x, ARMORY.y - 20, `军械库 · 副武器(${gm.secondary.name})`, nearArmory, gm.secondary.color)
 
   // ---- HUD ----
   g.textAlign = 'left'
@@ -668,7 +680,7 @@ export function drawHub(gm: Game) {
   }
   g.textAlign = 'right'
   g.fillStyle = '#5c6285'
-  g.fillText('WASD 移动 · E 交互 · I 背包 · C 角色', VW - 8, 18)
+  g.fillText('WASD 移动 · E 交互 · I 背包 · C 角色 · V 军械库', VW - 8, 18)
 
   // 家园提示消息
   if (gm.hubMsgT > 0) {
@@ -679,6 +691,78 @@ export function drawHub(gm: Game) {
     g.fillText(gm.hubMsg, VW / 2, VH - 26)
     g.globalAlpha = 1
   }
+}
+
+export function drawArmory(gm: Game) {
+  const g = gm.g
+  g.fillStyle = 'rgba(7,7,13,0.93)'
+  g.fillRect(0, 0, VW, VH)
+  g.textAlign = 'center'
+  g.font = 'bold 15px monospace'
+  g.fillStyle = '#ffd75e'
+  g.fillText('军 械 库', VW / 2, 32)
+  g.font = '8px monospace'
+  g.fillStyle = '#9aa4c8'
+  g.fillText('副武器用右键释放，独立冷却，不吃主武器射速加成 · ESC / V 返回', VW / 2, 48)
+  g.textAlign = 'right'
+  g.font = 'bold 10px monospace'
+  g.fillStyle = '#ffd75e'
+  g.fillText(`金币 ${gm.profile.gold}`, VW - 14, 32)
+
+  const rects = gm.armoryRects()
+  SECONDARIES.forEach((w, i) => {
+    const r = rects[i]
+    const owned = gm.profile.secondaries.includes(w.id)
+    const sel = gm.profile.secondary === w.id
+    const hover = Input.mx >= r.x && Input.mx <= r.x + r.w && Input.my >= r.y && Input.my <= r.y + r.h
+    const afford = gm.profile.gold >= w.cost
+
+    g.fillStyle = sel ? '#232743' : '#171a2e'
+    g.fillRect(r.x, r.y, r.w, r.h)
+    g.strokeStyle = sel ? w.color : hover ? '#ffd75e' : '#3a3f66'
+    g.lineWidth = sel ? 2 : 1
+    g.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1)
+    g.lineWidth = 1
+
+    // 图示：用简单形状表达各自的攻击形态
+    const cx = r.x + r.w / 2, cy = r.y + 34
+    g.strokeStyle = owned ? w.color : '#5c6285'
+    g.fillStyle = owned ? w.color : '#5c6285'
+    g.lineWidth = 2
+    if (w.id === 'shotgun') {
+      for (let k = -2; k <= 2; k++) {
+        g.beginPath(); g.moveTo(cx, cy + 10); g.lineTo(cx + k * 8, cy - 12); g.stroke()
+      }
+    } else if (w.id === 'beamgun') {
+      g.beginPath(); g.moveTo(cx, cy + 12); g.lineTo(cx, cy - 14); g.stroke()
+    } else if (w.id === 'grenade') {
+      g.beginPath(); g.arc(cx, cy, 8, 0, Math.PI * 2); g.stroke()
+      g.fillRect(cx - 1, cy - 14, 2, 5)
+    } else if (w.id === 'boomerang') {
+      g.beginPath(); g.arc(cx, cy, 10, Math.PI * 0.2, Math.PI * 1.5); g.stroke()
+    } else if (w.id === 'mine') {
+      g.beginPath(); g.arc(cx, cy, 6, 0, Math.PI * 2); g.fill()
+      g.beginPath(); g.arc(cx, cy, 12, 0, Math.PI * 2); g.stroke()
+    } else {
+      for (const rr of [6, 11, 15]) { g.beginPath(); g.arc(cx, cy, rr, 0, Math.PI * 2); g.stroke() }
+    }
+    g.lineWidth = 1
+
+    g.textAlign = 'center'
+    g.font = 'bold 10px monospace'
+    g.fillStyle = owned ? w.color : '#5c6285'
+    g.fillText(w.name, r.x + r.w / 2, r.y + 64)
+    g.font = '7px monospace'
+    g.fillStyle = '#9aa4c8'
+    wrapText(gm, w.desc, r.x + r.w / 2, r.y + 78, r.w - 10, 9)
+    g.fillStyle = '#57c7ff'
+    g.fillText(`冷却 ${w.cd}s · 伤害 ${w.dmg}x`, r.x + r.w / 2, r.y + r.h - 20)
+
+    g.font = 'bold 8px monospace'
+    if (sel) { g.fillStyle = w.color; g.fillText('● 已装备', r.x + r.w / 2, r.y + r.h - 8) }
+    else if (owned) { g.fillStyle = '#9aa4c8'; g.fillText('点击装备', r.x + r.w / 2, r.y + r.h - 8) }
+    else { g.fillStyle = afford ? '#ffd75e' : '#ff6b6b'; g.fillText(`${w.cost} 金币`, r.x + r.w / 2, r.y + r.h - 8) }
+  })
 }
 
 export function drawMenu(gm: Game) {
@@ -769,6 +853,7 @@ export function draw(gm: Game) {
   if (gm.state === 'hub') { drawHub(gm); return }
   if (gm.state === 'inventory') { drawHub(gm); drawInventory(gm); return }
   if (gm.state === 'charselect') { drawHub(gm); drawCharSelect(gm); return }
+  if (gm.state === 'armory') { drawHub(gm); drawArmory(gm); return }
 
   // 房间制：相机固定，一屏一间，只有震动会偏移
   const sx = Math.round(gm.shake > 0 ? rand(-3, 3) * gm.shake : 0)
@@ -1440,6 +1525,21 @@ export function drawHud(gm: Game) {
     g.font = ready ? 'bold 7px monospace' : '7px monospace'
     g.fillStyle = ready ? gm.active.color : '#9aa4c8'
     g.fillText(ready ? 'Q 就绪' : `${gm.activeCharge}/${gm.active.charge}`, ax + 14, ay + 36)
+  }
+
+  // 副武器槽（冲刺条上方）
+  {
+    const w = gm.secondary
+    const ready = gm.secT <= 0
+    const sw = 40
+    g.fillStyle = '#171a2e'
+    g.fillRect(4, VH - 28, sw, 4)
+    g.fillStyle = ready ? w.color : '#3a3f66'
+    g.fillRect(4, VH - 28, sw * (ready ? 1 : 1 - gm.secT / w.cd), 4)
+    g.textAlign = 'left'
+    g.font = '6px monospace'
+    g.fillStyle = ready ? w.color : '#5c6285'
+    g.fillText(`${w.name}(右键)`, 4 + sw + 4, VH - 24)
   }
 
   // 冲刺冷却（HP 条上方小条）

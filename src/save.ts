@@ -16,6 +16,10 @@ export interface Profile {
   chars: string[]
   /** 当前选中的角色 id */
   char: string
+  /** 已解锁的副武器 id */
+  secondaries: string[]
+  /** 当前选中的副武器 */
+  secondary: string
   /** 已达成的成就 id */
   achs: string[]
   /** 成就统计口径 */
@@ -36,6 +40,8 @@ export function emptyProfile(): Profile {
     runs: 0,
     chars: ['knight'],
     char: 'knight',
+    secondaries: ['shotgun'],
+    secondary: 'shotgun',
     achs: [],
     ach: emptyAchStats(),
   }
@@ -56,6 +62,8 @@ export function loadProfile(): Profile {
         // 老存档没有角色字段，回落到初始角色
         chars: Array.isArray(p.chars) && p.chars.length ? p.chars : base.chars,
         char: p.char || base.char,
+        secondaries: Array.isArray(p.secondaries) && p.secondaries.length ? p.secondaries : base.secondaries,
+        secondary: p.secondary || base.secondary,
         achs: Array.isArray(p.achs) ? p.achs : [],
         // 逐字段合并：新增统计项时老档不会缺键
         ach: { ...base.ach, ...(p.ach || {}), bosses: Array.isArray(p.ach?.bosses) ? p.ach!.bosses : [] },
@@ -82,7 +90,8 @@ const RUN_KEY = 'pxsurv-run'
 // v2: 增加 charId（缺失会按错误基础血量恢复）
 // v3: 增加 curseIds / endless（缺失会让诅咒凭空消失、无尽模式退回通关判定）
 // v4: 增加 devilDeals / winRecorded（缺失会导致天使房误判、通关奖励可被读档重复领取）
-const RUN_VER = 4
+// v5: 增加 secId（缺失会让读档后副武器回落成霰弹）
+const RUN_VER = 5
 
 export interface SavedRoom {
   gx: number; gy: number; type: string
@@ -100,6 +109,7 @@ export interface SavedPed {
 export interface RunSave {
   v: number
   charId: string
+  secId: string
   depth: number
   curKey: string
   startKey: string

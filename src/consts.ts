@@ -44,7 +44,7 @@ export const ROOM_MOOD: Partial<Record<string, { floor: string; wall: string; vi
 export type ObKind = 'rock' | 'spike' | 'pit'
 export interface Ob { col: number; row: number; kind: ObKind; hp: number; maxHp: number; flash: number }
 
-export type State = 'menu' | 'hub' | 'inventory' | 'charselect' | 'play' | 'pause' | 'end' | 'victory'
+export type State = 'menu' | 'hub' | 'inventory' | 'charselect' | 'armory' | 'play' | 'pause' | 'end' | 'victory'
 
 // ---------- 家园布局（世界坐标，玩家在家园从 0,0 出生）----------
 export const HUB = { x0: -180, x1: 180, y0: -160, y1: 140 }
@@ -52,6 +52,7 @@ export const PORTAL = { x: 0, y: -118 }
 export const STASH = { x: -96, y: 46 }
 export const FORGE = { x: 96, y: 46 }
 export const STATUE = { x: 0, y: 62 }
+export const ARMORY = { x: -150, y: -40 }
 export const FORGE_COST = 60
 export type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner' | 'healer' | 'ghost' | 'shieldbearer' | 'charger' | 'tether'
 
@@ -231,6 +232,14 @@ export interface Particle { x: number; y: number; vx: number; vy: number; life: 
 export interface FloatText { x: number; y: number; txt: string; life: number; color: string; size: number }
 export interface Nova { x: number; y: number; r: number; maxR: number; dmg: number; hit: Set<number> }
 export interface Bolt { pts: number[]; life: number }
+/** 手雷：抛物落点后延时爆炸 */
+export interface Grenade { x: number; y: number; vx: number; vy: number; fuse: number; dmg: number; radius: number }
+/** 地雷：布下后感应触发 */
+export interface Mine { x: number; y: number; arm: number; dmg: number; radius: number }
+/** 激光束：瞬发，只用于渲染 */
+export interface Beam { x1: number; y1: number; x2: number; y2: number; life: number; color: string }
+/** 回旋刃 */
+export interface Boomer { x: number; y: number; vx: number; vy: number; t: number; out: number; back: boolean; dmg: number; hit: Set<number>; ang: number }
 export interface Chest { x: number; y: number; opened: number }
 /** 道具台。price>0 时需要付费：gold 扣金币，hp 扣生命 */
 export interface Pedestal {
