@@ -117,8 +117,9 @@ export class Game {
   /** 近战挥砍动画剩余时间与朝向 */
   swingT = 0
   swingAng = 0
-  /** 掉在地上的武器 */
+  /** 掉在地上的武器（当前房间视图，实际按房间 key 存于 roomGuns） */
   groundWeapons: { x: number; y: number; id: string }[] = []
+  roomGuns = new Map<string, { x: number; y: number; id: string }[]>()
 
   /** 本局试炼层级与其累积修正（局内锁定，家园切换不影响进行中的一局） */
   runAsc = 0
@@ -280,7 +281,7 @@ export class Game {
     this.asc = computeAsc(this.runAsc)
     this.slots = [START_WEAPON, null]; this.slotIdx = 0
     this.energy = 100; this.maxEnergy = 100
-    this.swingT = 0; this.groundWeapons = []
+    this.swingT = 0; this.groundWeapons = []; this.roomGuns.clear()
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
@@ -297,6 +298,7 @@ export class Game {
     // 生成第一层并进入起始房
     this.roomObs.clear()
     this.roomPeds.clear()
+    this.roomGuns.clear()
     this.floor = genFloor(1)
     this.convertAngelRoom()
     this.enterRoom(this.floor.startKey, null)
@@ -319,7 +321,6 @@ export class Game {
     this.novas = []; this.bolts = []
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.gems = []; this.hearts = []; this.chests = []
-    this.groundWeapons = []
     this.grid.clear()
     this.boss = null
     this.pedestals = []
@@ -347,6 +348,11 @@ export class Game {
     let peds = this.roomPeds.get(key)
     if (!peds) { peds = this.makePedestals(r); this.roomPeds.set(key, peds) }
     this.pedestals = peds
+
+    // 地上武器随房间保存：Boss 掉的枪出门再回来还在
+    let guns = this.roomGuns.get(key)
+    if (!guns) { guns = []; this.roomGuns.set(key, guns) }
+    this.groundWeapons = guns
 
     // 每进一间房存一次档
     this.snapshotRun()
@@ -446,8 +452,9 @@ export class Game {
     }
     this.floor = { rooms, startKey: s.startKey, bossKey: s.bossKey, depth: s.depth }
 
-    // 还原地形与道具台
+    // 还原地形与道具台（地上武器未入档，读档后视为消失——比残留上一局的枪安全）
     this.roomObs.clear()
+    this.roomGuns.clear()
     for (const [k, list] of s.obs || []) {
       this.roomObs.set(k, list.map(o => ({ col: o.col, row: o.row, kind: o.kind as ObKind, hp: o.hp, maxHp: o.maxHp, flash: 0 })))
     }
@@ -471,7 +478,7 @@ export class Game {
     this.asc = computeAsc(this.runAsc)
     this.slots = [START_WEAPON, null]; this.slotIdx = 0
     this.energy = 100; this.maxEnergy = 100
-    this.swingT = 0; this.groundWeapons = []
+    this.swingT = 0; this.groundWeapons = []; this.roomGuns.clear()
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0; this.fearT = 0
     this.eid = 1
@@ -881,6 +888,7 @@ export class Game {
     // 房间 key 只有 gx,gy，跨层会重复 —— 不清空的话新层会继承上一层的地形（含已打碎的石头）
     this.roomObs.clear()
     this.roomPeds.clear()
+    this.roomGuns.clear()
     this.enterRoom(this.floor.startKey, null)
     // 深入一层同时提升生命上限并回一部分血，让「往下走」本身构成成长。
     // 不给的话审计显示玩家等效生命全程零增长，而敌人伤害是递增的。
@@ -2521,6 +2529,12 @@ export class Game {
     this.float(x, y - 14, w.name, w.color, 9)
   }
 
+  /** 从当前房间的地上武器缓存里移除（groundWeapons 与缓存共享同一数组引用） */
+  removeGroundWeapon(gw: { x: number; y: number; id: string }) {
+    const i = this.groundWeapons.indexOf(gw)
+    if (i >= 0) this.groundWeapons.splice(i, 1)
+  }
+
   /** 走近地上武器按 E 拾取。副槽空则入副槽，满则与当前槽交换 */
   updateGroundWeapons() {
     for (const gw of this.groundWeapons) {
@@ -2530,13 +2544,13 @@ export class Game {
         if (!this.slots[1]) {
           this.slots[1] = picked
           this.slotIdx = 1
-          this.groundWeapons = this.groundWeapons.filter(g => g !== gw)
+          this.removeGroundWeapon(gw)
         } else {
           // 交换：手里这把丢回地上（初始手枪直接丢弃，不占地面）
           const old = this.gun
           this.slots[this.slotIdx] = picked
           if (old.id !== 'wpistol') { gw.id = old.id }
-          else this.groundWeapons = this.groundWeapons.filter(g => g !== gw)
+          else this.removeGroundWeapon(gw)
         }
         this.float(this.px, this.py - 24, `装备 ${picked.name}`, picked.color, 10)
         sfx.levelup()
