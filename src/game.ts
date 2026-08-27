@@ -18,6 +18,7 @@ import { CHARS, CharDef, getChar } from './chars'
 import { ACHIEVEMENTS, newlyEarned } from './achievements'
 import { SECONDARIES, SecondaryDef, getSecondary } from './weapons'
 import { AscMods, computeAsc, ASCENSIONS, MAX_ASCENSION, ascLevelInfo, baseAsc } from './ascension'
+import { ArsenalWeapon, ARSENAL, getWeapon, rollWeapon, START_WEAPON } from './arsenal'
 import * as R from './render'
 
 // 常量与类型集中在 consts.ts，避免 render.ts 反向依赖 game.ts 造成运行时循环
@@ -105,6 +106,20 @@ export class Game {
   teslaT = 0
   // ---- 副武器 ----
   secondary: SecondaryDef = getSecondary(this.profile.secondary)
+  // ---- 武器库（元气骑士式拾取制）----
+  /** 双武器槽与当前槽位 */
+  slots: [ArsenalWeapon, ArsenalWeapon | null] = [START_WEAPON, null]
+  slotIdx = 0
+  get gun(): ArsenalWeapon { return this.slots[this.slotIdx] || START_WEAPON }
+  /** 能量（蓝条）：武器弹药 */
+  energy = 100
+  maxEnergy = 100
+  /** 近战挥砍动画剩余时间与朝向 */
+  swingT = 0
+  swingAng = 0
+  /** 掉在地上的武器 */
+  groundWeapons: { x: number; y: number; id: string }[] = []
+
   /** 本局试炼层级与其累积修正（局内锁定，家园切换不影响进行中的一局） */
   runAsc = 0
   asc: AscMods = baseAsc()
@@ -263,6 +278,9 @@ export class Game {
     this.secondary = getSecondary(this.profile.secondary); this.secT = 0
     this.runAsc = this.profile.asc
     this.asc = computeAsc(this.runAsc)
+    this.slots = [START_WEAPON, null]; this.slotIdx = 0
+    this.energy = 100; this.maxEnergy = 100
+    this.swingT = 0; this.groundWeapons = []
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
@@ -301,6 +319,7 @@ export class Game {
     this.novas = []; this.bolts = []
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.gems = []; this.hearts = []; this.chests = []
+    this.groundWeapons = []
     this.grid.clear()
     this.boss = null
     this.pedestals = []
@@ -343,6 +362,9 @@ export class Game {
       charId: this.runChar.id,
       secId: this.secondary.id,
       asc: this.runAsc,
+      slotIds: this.slots.map(w => w ? w.id : null),
+      slotIdx: this.slotIdx,
+      energy: this.energy,
       depth: this.depth,
       curKey: this.curKey,
       startKey: this.floor.startKey,
@@ -401,6 +423,9 @@ export class Game {
     this.secondary = getSecondary(s.secId)
     this.runAsc = s.asc || 0
     this.asc = computeAsc(this.runAsc)
+    this.slots = [getWeapon(s.slotIds?.[0] || undefined), s.slotIds?.[1] ? getWeapon(s.slotIds[1]!) : null]
+    this.slotIdx = s.slotIdx === 1 && this.slots[1] ? 1 : 0
+    this.energy = typeof s.energy === 'number' ? clamp(s.energy, 0, 100) : 100
     this.maxHp = this.computeMaxHp()
     this.hp = clamp(s.hp, 1, this.maxHp)
     this.active = s.activeId ? (ACTIVE_BY_ID.get(s.activeId) ?? null) : null
@@ -444,6 +469,9 @@ export class Game {
     this.secondary = getSecondary(this.profile.secondary); this.secT = 0
     this.runAsc = this.profile.asc
     this.asc = computeAsc(this.runAsc)
+    this.slots = [START_WEAPON, null]; this.slotIdx = 0
+    this.energy = 100; this.maxEnergy = 100
+    this.swingT = 0; this.groundWeapons = []
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0; this.fearT = 0
     this.eid = 1
@@ -1055,6 +1083,7 @@ export class Game {
     this.hurtFlash = Math.max(0, this.hurtFlash - dt * 4)
 
     this.roomFlash = Math.max(0, this.roomFlash - dt)
+    this.swingT = Math.max(0, this.swingT - dt)
     this.freezeAll = Math.max(0, this.freezeAll - dt)
     this.fearT = Math.max(0, this.fearT - dt)
     // 连击窗口：停手就断
@@ -1103,6 +1132,7 @@ export class Game {
     this.rebuildGrid()
     this.separateEnemies()
     this.updateWeapons(dt)
+    this.updateGroundWeapons()
     this.updateSecondary(dt)
     this.updateFieldEffects(dt)
     this.updateShots(dt)
@@ -1673,9 +1703,19 @@ export class Game {
     // 冷却只减到 0 不再往下走，避免松手期间攒出负值、一按下去糊一串子弹
     this.fireT = Math.max(0, this.fireT - dt)
     if (Input.mdown && this.fireT <= 0) {
-      this.fireT = 0.5 / Math.max(0.15, st.rate)
+      this.fireT = this.gun.cd / Math.max(0.15, st.rate)
       this.fireShot()
     }
+    // 切枪：Tab 或 X 在双槽间切换
+    if (Input.pressed('tab') || Input.pressed('x')) {
+      if (this.slots[1]) {
+        this.slotIdx = 1 - this.slotIdx
+        this.float(this.px, this.py - 22, this.gun.name, this.gun.color, 9)
+        sfx.pickup()
+      }
+    }
+    // 能量缓慢自然回复（主要靠拾取金币补充）
+    this.energy = Math.min(this.maxEnergy, this.energy + 2.2 * dt)
 
     // ---- 环绕法球 ----
     if (st.orbit > 0) {
@@ -1725,30 +1765,87 @@ export class Game {
   /** 按当前属性打出一轮弹幕 */
   fireShot() {
     const st = this.stats
-    const n = 1 + Math.floor(st.count)
+    const w = this.gun
+
+    // 能量不足时自动回落到不耗能的武器位（手枪/近战），不让玩家干瞪眼
+    if (w.energy > 0 && this.energy < w.energy) {
+      const freeIdx = this.slots.findIndex(x => x && x.energy === 0)
+      if (freeIdx >= 0) this.slotIdx = freeIdx
+      else return
+    }
+    const use = this.gun
+    if (use.energy > 0) this.energy -= use.energy
+
+    if (use.cls === 'melee') {
+      this.meleeSwing(use)
+      return
+    }
+    // 武器弹幕 × 道具修饰：弹数与散布相加，伤害与弹速相乘
+    const n = use.count + Math.floor(st.count)
     const base = this.aimAngle
-    const dmg = 9 * st.dmg
+    const dmg = use.dmg * st.dmg
     for (let i = 0; i < n; i++) {
-      const a = base + (i - (n - 1) / 2) * st.spread + rand(-0.02, 0.02)
-      this.spawnShot(this.px, this.py, a, dmg, st)
+      const a = base + (i - (n - 1) / 2) * Math.max(use.spread, st.spread * 0.6) + rand(-0.02, 0.02)
+      this.spawnShot(this.px, this.py, a, dmg, st, undefined, use)
     }
     sfx.shoot()
   }
 
-  spawnShot(x: number, y: number, ang: number, dmg: number, st: RunStats, splitLeft?: number) {
+  /** 近战：扇形判定 + 弹反弹幕（元气骑士的招牌） */
+  meleeSwing(w: ArsenalWeapon) {
+    const st = this.stats
+    this.swingT = 0.16
+    this.swingAng = this.aimAngle
+    const reach = (w.reach || 34) * (1 + st.size * 0.1)
+    const arc = w.arc || 1.6
+    const dmg = w.dmg * st.dmg
+    this.forEachNear(this.px, this.py, reach + 12, e => {
+      if (e.dead) return
+      const d = Math.sqrt(dist2(e.x, e.y, this.px, this.py))
+      if (d > reach + e.r) return
+      const ang = Math.atan2(e.y - this.py, e.x - this.px)
+      let diff = Math.abs(((ang - this.swingAng + Math.PI * 3) % (Math.PI * 2)) - Math.PI)
+      if (diff > arc / 2) return
+      this.damage(e, dmg)
+      // 近战自带击退
+      if (!e.dead && e.kind !== 'boss') {
+        e.x += Math.cos(ang) * 10
+        e.y += Math.sin(ang) * 10
+      }
+    })
+    // 弹反：弧内的敌方弹体转为己方弹幕反射回去
+    if (w.deflect) {
+      for (const p of this.eprojs) {
+        const d = Math.hypot(p.x - this.px, p.y - this.py)
+        if (d > reach + 8) continue
+        const ang = Math.atan2(p.y - this.py, p.x - this.px)
+        let diff = Math.abs(((ang - this.swingAng + Math.PI * 3) % (Math.PI * 2)) - Math.PI)
+        if (diff > arc / 2) continue
+        p.life = 0
+        this.spawnShot(p.x, p.y, ang, p.dmg * 1.5, st)
+        this.burst(p.x, p.y, '#ffffff', 6)
+      }
+      sfx.hit()
+    }
+    this.shake = Math.max(this.shake, 0.15)
+    sfx.shoot()
+  }
+
+  spawnShot(x: number, y: number, ang: number, dmg: number, st: RunStats, splitLeft?: number, wp?: ArsenalWeapon) {
     if (this.shots.length > 260) return // 上限保护：分裂+弹射可能指数增长
-    const sp = 250 * st.speed
+    const sp = (wp ? wp.speed : 250) * st.speed
     this.shots.push({
       x, y,
       vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
       dmg,
-      life: 1.3 * st.range,
-      pierce: st.pierce,
-      bounce: st.bounce,
+      life: (wp ? wp.life : 1.3) * st.range,
+      pierce: (wp?.pierce || 0) + st.pierce,
+      bounce: (wp?.bounce || 0) + st.bounce,
       split: splitLeft !== undefined ? splitLeft : st.split,
-      size: 3.5 * st.size,
+      size: (wp?.size || 3.5) * st.size,
       hit: new Set(),
       targetId: -1,
+      explode: wp?.explode || 0,
     })
   }
 
@@ -1846,10 +1943,11 @@ export class Game {
       e.x += Math.cos(ang) * kb
       e.y += Math.sin(ang) * kb
     }
-    // 爆炸
-    if (st.explode > 0) {
-      const r = 26 + st.explode * 14
-      const ed = p.dmg * st.explode
+    // 爆炸（道具爆炸与武器自爆叠加）
+    const exp = st.explode + p.explode
+    if (exp > 0) {
+      const r = 26 + exp * 14
+      const ed = p.dmg * exp
       this.novas.push({ x: p.x, y: p.y, r: 4, maxR: r, dmg: ed, hit: new Set() })
       this.burst(p.x, p.y, '#ff9f4f', 10)
       this.shake = Math.max(this.shake, 0.2)
@@ -1991,8 +2089,13 @@ export class Game {
     // 金币与装备掉落
     this.runGold += e.kind === 'boss' ? 120 : e.kind === 'elite' ? 30
       : (e.kind === 'summoner' || e.kind === 'healer') ? 5 : 1
-    if (e.kind === 'boss') { this.dropLoot(e.x, e.y, 2, 35) }
-    else if (e.kind === 'elite') { this.dropLoot(e.x, e.y, 1, 18) }
+    if (e.kind === 'boss') {
+      this.dropLoot(e.x, e.y, 2, 35)
+      this.dropGroundWeapon(e.x, e.y - 14, 1)
+    } else if (e.kind === 'elite') {
+      this.dropLoot(e.x, e.y, 1, 18)
+      if (chance(0.35)) this.dropGroundWeapon(e.x, e.y - 12, 0)
+    }
     else if (chance(0.012)) { this.dropLoot(e.x, e.y, 1, 0) }
     // 掉落
     if (e.kind === 'boss') {
@@ -2277,7 +2380,7 @@ export class Game {
             x: this.px, y: this.py,
             vx: Math.cos(sa) * 300, vy: Math.sin(sa) * 300,
             dmg: dmg / 3, life: 0.32, pierce: st.pierce, bounce: 0, split: 0,
-            size: 3, hit: new Set(), targetId: -1,
+            size: 3, hit: new Set(), targetId: -1, explode: 0,
           })
         }
         this.shake = 0.35
@@ -2411,6 +2514,37 @@ export class Game {
     this.boomers = this.boomers.filter(b => b.t < 6)
   }
 
+  /** 掉一把武器在地上 */
+  dropGroundWeapon(x: number, y: number, minTier: number) {
+    const w = rollWeapon(minTier, this.stats.luck + this.depth * 2)
+    this.groundWeapons.push({ x, y, id: w.id })
+    this.float(x, y - 14, w.name, w.color, 9)
+  }
+
+  /** 走近地上武器按 E 拾取。副槽空则入副槽，满则与当前槽交换 */
+  updateGroundWeapons() {
+    for (const gw of this.groundWeapons) {
+      if (dist2(gw.x, gw.y, this.px, this.py) >= 18 * 18) continue
+      if (Input.pressed('e')) {
+        const picked = getWeapon(gw.id)
+        if (!this.slots[1]) {
+          this.slots[1] = picked
+          this.slotIdx = 1
+          this.groundWeapons = this.groundWeapons.filter(g => g !== gw)
+        } else {
+          // 交换：手里这把丢回地上（初始手枪直接丢弃，不占地面）
+          const old = this.gun
+          this.slots[this.slotIdx] = picked
+          if (old.id !== 'wpistol') { gw.id = old.id }
+          else this.groundWeapons = this.groundWeapons.filter(g => g !== gw)
+        }
+        this.float(this.px, this.py - 24, `装备 ${picked.name}`, picked.color, 10)
+        sfx.levelup()
+        return
+      }
+    }
+  }
+
   /** 受击反制：对周围敌人造成一圈伤害 */
   doRetaliate() {
     const r = this.stats.retaliate
@@ -2502,6 +2636,7 @@ export class Game {
       gem.y += gem.vy * dt
       if (d < 7) {
         this.gainCoin(gem.val)
+        this.energy = Math.min(this.maxEnergy, this.energy + 3) // 拾取补蓝，鼓励打完就捡
         gem.val = -1 // 标记已拾取
       }
     }

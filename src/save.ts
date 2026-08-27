@@ -104,7 +104,8 @@ const RUN_KEY = 'pxsurv-run'
 // v4: 增加 devilDeals / winRecorded（缺失会导致天使房误判、通关奖励可被读档重复领取）
 // v5: 增加 secId（缺失会让读档后副武器回落成霰弹）
 // v6: 增加 asc（缺失会让读档后试炼层级归零，等于白送难度减免）
-const RUN_VER = 6
+// v7: 增加 slotIds/slotIdx/energy（武器拾取制：缺失会让读档丢失捡到的武器）
+const RUN_VER = 7
 
 export interface SavedRoom {
   gx: number; gy: number; type: string
@@ -124,6 +125,9 @@ export interface RunSave {
   charId: string
   secId: string
   asc: number
+  slotIds: (string | null)[]
+  slotIdx: number
+  energy: number
   depth: number
   curKey: string
   startKey: string

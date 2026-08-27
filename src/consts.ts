@@ -225,6 +225,8 @@ export interface Shot {
   size: number
   hit: Set<number> // 已命中敌人，防止穿透时对同一目标反复结算
   targetId: number
+  /** 武器自带的命中爆炸系数（火箭筒），与道具爆炸叠加 */
+  explode: number
 }
 export interface EProj { x: number; y: number; vx: number; vy: number; dmg: number; life: number; r: number; color: string }
 export interface Gem { x: number; y: number; val: number; vx: number; vy: number }

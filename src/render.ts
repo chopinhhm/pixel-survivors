@@ -5,6 +5,7 @@
 import type { Game } from './game'
 import { SECONDARIES } from './weapons'
 import { ASCENSIONS, MAX_ASCENSION, ascLevelInfo, computeAsc } from './ascension'
+import { getWeapon } from './arsenal'
 import type { EnemyKind, Ob } from './consts'
 import { OB_CELL } from './layouts'
 import { SPR, FLOOR, makeEmblem } from './sprites'
@@ -1618,6 +1619,44 @@ export function drawHud(gm: Game) {
     g.font = ready ? 'bold 7px monospace' : '7px monospace'
     g.fillStyle = ready ? gm.active.color : '#9aa4c8'
     g.fillText(ready ? 'Q 就绪' : `${gm.activeCharge}/${gm.active.charge}`, ax + 14, ay + 36)
+  }
+
+  // 能量条（蓝条，武器弹药）
+  {
+    const ew = 70
+    g.fillStyle = '#171a2e'
+    g.fillRect(4, VH - 36, ew, 5)
+    g.fillStyle = gm.energy < 12 ? '#ff6b6b' : '#57c7ff'
+    g.fillRect(4, VH - 36, ew * clamp(gm.energy / gm.maxEnergy, 0, 1), 5)
+    g.strokeStyle = '#26233a'
+    g.strokeRect(4.5, VH - 36.5, ew, 6)
+    g.textAlign = 'left'
+    g.font = '6px monospace'
+    g.fillStyle = '#9aa4c8'
+    g.fillText(`能量 ${Math.round(gm.energy)}`, 4 + ew + 4, VH - 31)
+  }
+  // 武器槽（左下，当前高亮；Tab/X 切换）
+  {
+    let wx = 4
+    const wy = VH - 58
+    gm.slots.forEach((w, i) => {
+      if (!w) return
+      const cur = i === gm.slotIdx
+      g.fillStyle = cur ? 'rgba(35,39,67,0.95)' : 'rgba(23,26,46,0.7)'
+      g.fillRect(wx, wy, 52, 14)
+      g.strokeStyle = cur ? w.color : '#3a3f66'
+      g.strokeRect(wx + 0.5, wy + 0.5, 51, 13)
+      g.textAlign = 'left'
+      g.font = cur ? 'bold 7px monospace' : '7px monospace'
+      g.fillStyle = cur ? w.color : '#5c6285'
+      g.fillText(w.name, wx + 3, wy + 10)
+      if (w.energy > 0) {
+        g.textAlign = 'right'
+        g.fillStyle = '#57c7ff'
+        g.fillText(String(w.energy), wx + 49, wy + 10)
+      }
+      wx += 56
+    })
   }
 
   // 副武器槽（冲刺条上方）
