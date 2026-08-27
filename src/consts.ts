@@ -44,7 +44,7 @@ export const ROOM_MOOD: Partial<Record<string, { floor: string; wall: string; vi
 export type ObKind = 'rock' | 'spike' | 'pit'
 export interface Ob { col: number; row: number; kind: ObKind; hp: number; maxHp: number; flash: number }
 
-export type State = 'menu' | 'hub' | 'inventory' | 'charselect' | 'armory' | 'play' | 'pause' | 'end' | 'victory'
+export type State = 'menu' | 'hub' | 'inventory' | 'charselect' | 'armory' | 'ascension' | 'play' | 'pause' | 'end' | 'victory'
 
 // ---------- 家园布局（世界坐标，玩家在家园从 0,0 出生）----------
 export const HUB = { x0: -180, x1: 180, y0: -160, y1: 140 }
@@ -53,6 +53,7 @@ export const STASH = { x: -96, y: 46 }
 export const FORGE = { x: 96, y: 46 }
 export const STATUE = { x: 0, y: 62 }
 export const ARMORY = { x: -150, y: -40 }
+export const TRIAL = { x: 150, y: -40 }
 export const FORGE_COST = 60
 export type EnemyKind = 'slime' | 'bat' | 'skel' | 'elite' | 'boss' | 'bomber' | 'turret' | 'summoner' | 'healer' | 'ghost' | 'shieldbearer' | 'charger' | 'tether'
 
@@ -261,11 +262,13 @@ export const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: numbe
   elite: { hp: 150, spd: 30, dmg: 20, r: 10, xp: 20, scale: 1.8 },
   boss: { hp: 850, spd: 24, dmg: 30, r: 14, xp: 60, scale: 2 },
   bomber: { hp: 18, spd: 68, dmg: 26, r: 6, xp: 3, scale: 1.15 },
-  turret: { hp: 55, spd: 0, dmg: 12, r: 7, xp: 4, scale: 1.1 },
+  turret: { hp: 42, spd: 0, dmg: 12, r: 7, xp: 4, scale: 1.1 },
   summoner: { hp: 48, spd: 26, dmg: 12, r: 6, xp: 5, scale: 1.1 },
   healer: { hp: 40, spd: 30, dmg: 8, r: 6, xp: 5, scale: 1.1 },
   ghost: { hp: 30, spd: 30, dmg: 16, r: 6, xp: 4, scale: 1.1 },
-  shieldbearer: { hp: 70, spd: 24, dmg: 18, r: 8, xp: 6, scale: 1.4 },
+  // 血量刻意压低：盾卫的防御来自「必须绕后」的角度机制，不该再叠厚血条。
+  // 原本 70 血 + 正面减伤 70% = 等效 233 血，是普通怪的 6 倍，把第6层清层时间从 95s 拖到 176s。
+  shieldbearer: { hp: 38, spd: 24, dmg: 18, r: 8, xp: 6, scale: 1.4 },
   charger: { hp: 45, spd: 36, dmg: 24, r: 7, xp: 5, scale: 1.3 },
   tether: { hp: 42, spd: 18, dmg: 10, r: 6, xp: 5, scale: 1.1 },
 }

@@ -17,13 +17,14 @@ import { makeEmblem } from './sprites'
 import { CHARS, CharDef, getChar } from './chars'
 import { ACHIEVEMENTS, newlyEarned } from './achievements'
 import { SECONDARIES, SecondaryDef, getSecondary } from './weapons'
+import { AscMods, computeAsc, ASCENSIONS, MAX_ASCENSION, ascLevelInfo, baseAsc } from './ascension'
 import * as R from './render'
 
 // 常量与类型集中在 consts.ts，避免 render.ts 反向依赖 game.ts 造成运行时循环
 import {
   ENEMY_DRAW_SCALE, VW, VH, ROOM_W, ROOM_H, OX, OY, DOOR_HALF, WALL,
   OBX, OBY, CROSS_COL, CROSS_ROW, ROOM_MOOD,
-  HUB, PORTAL, STASH, FORGE, STATUE, ARMORY, FORGE_COST,
+  HUB, PORTAL, STASH, FORGE, STATUE, ARMORY, TRIAL, FORGE_COST,
   FINAL_DEPTH, BOSSES, BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_BASE,
   CHAMPS, CHAMP_BY_ID, themeFor, DEPTH_HP_BONUS, ENEMY_HP_SCALE, ENEMY_DMG_SCALE, ENEMY_SPD_SCALE,
 } from './consts'
@@ -104,6 +105,9 @@ export class Game {
   teslaT = 0
   // ---- 副武器 ----
   secondary: SecondaryDef = getSecondary(this.profile.secondary)
+  /** 本局试炼层级与其累积修正（局内锁定，家园切换不影响进行中的一局） */
+  runAsc = 0
+  asc: AscMods = baseAsc()
   secT = 0
   grenades: Grenade[] = []
   mines: Mine[] = []
@@ -172,8 +176,9 @@ export class Game {
   get baseHp() { return this.runChar.hp }
   /** 生命上限唯一算法：角色 + 装备 + 道具，再乘诅咒。散落多处会导致口径不一致 */
   computeMaxHp() {
-    const depthBonus = (this.depth - 1) * DEPTH_HP_BONUS
-    return Math.max(1, Math.round((this.baseHp + depthBonus + this.eq.maxHp + this.stats.maxHp) * this.curses.maxHpMul))
+    const depthBonus = (this.depth - 1) * DEPTH_HP_BONUS * this.asc.depthHpMul
+    const base = this.baseHp * this.asc.startHpMul
+    return Math.max(1, Math.round((base + depthBonus + this.eq.maxHp + this.stats.maxHp) * this.curses.maxHpMul))
   }
 
   // 角色 × 局内道具(stats) × 局外装备(eq) 三层叠加
@@ -256,6 +261,8 @@ export class Game {
     this.combo = 0; this.comboT = 0; this.comboBest = 0
     this.fireT = 0; this.orbAng = 0; this.boltT = 0; this.teslaT = 0
     this.secondary = getSecondary(this.profile.secondary); this.secT = 0
+    this.runAsc = this.profile.asc
+    this.asc = computeAsc(this.runAsc)
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
@@ -335,6 +342,7 @@ export class Game {
       v: RUN_SAVE_VER,
       charId: this.runChar.id,
       secId: this.secondary.id,
+      asc: this.runAsc,
       depth: this.depth,
       curKey: this.curKey,
       startKey: this.floor.startKey,
@@ -391,6 +399,8 @@ export class Game {
     // 但只抬上限不回血，避免"退出换装再进来"变成回血手段。
     this.runChar = getChar(s.charId)
     this.secondary = getSecondary(s.secId)
+    this.runAsc = s.asc || 0
+    this.asc = computeAsc(this.runAsc)
     this.maxHp = this.computeMaxHp()
     this.hp = clamp(s.hp, 1, this.maxHp)
     this.active = s.activeId ? (ACTIVE_BY_ID.get(s.activeId) ?? null) : null
@@ -432,6 +442,8 @@ export class Game {
     this.dashT = 0; this.dashCd = 0; this.dashBuf = 0
     this.fireT = 0; this.orbAng = 0; this.boltT = 0; this.teslaT = 0
     this.secondary = getSecondary(this.profile.secondary); this.secT = 0
+    this.runAsc = this.profile.asc
+    this.asc = computeAsc(this.runAsc)
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0; this.fearT = 0
     this.eid = 1
@@ -611,9 +623,9 @@ export class Game {
       e.r = def.r
       e.scale = def.scale
       const isFinal = this.depth >= FINAL_DEPTH
-      const hpScale = (1 + (this.depth - 1) * ENEMY_HP_SCALE) * (isFinal ? 1.6 : 1)
+      const hpScale = (1 + (this.depth - 1) * ENEMY_HP_SCALE) * (isFinal ? 1.6 : 1) * this.asc.enemyHp * this.asc.bossHp
       e.hp = e.maxHp = def.hp * hpScale
-      e.dmg = def.dmg * (1 + (this.depth - 1) * ENEMY_DMG_SCALE)
+      e.dmg = def.dmg * (1 + (this.depth - 1) * ENEMY_DMG_SCALE) * this.asc.enemyDmg
       this.boss = e
       sfx.boss()
       this.shake = 1
@@ -639,7 +651,7 @@ export class Game {
       }
       const e = this.spawnEnemyAt(pick(kinds), x, y)
       // 精英变体：出现率随层数上升，让后期每间房都可能有硬点
-      if (chance(Math.min(0.34, 0.05 + this.depth * 0.03 + theme.champBonus))) this.makeChampion(e)
+      if (chance(Math.min(0.5, 0.05 + this.depth * 0.03 + theme.champBonus + this.asc.champBonus))) this.makeChampion(e)
     }
     // 精英作为「房间挑战」偶发出现
     if (this.depth >= 2 && chance(0.18)) {
@@ -653,6 +665,8 @@ export class Game {
     const luck = this.stats.luck + this.depth * 2
     const cy = ROOM_H / 2
     if (r.type === 'treasure') {
+      // 高层级试炼下宝箱房可能空手而归
+      if (this.asc.pedestalLoss > 0 && chance(this.asc.pedestalLoss)) return []
       // 宝箱房：一件免费被动，或（未持有主动时）有概率给主动技能
       if (!this.active && chance(0.45)) {
         return [{ x: ROOM_W / 2, y: cy, item: null, act: rollActive(), price: 0, kind: 'free', taken: false }]
@@ -663,7 +677,7 @@ export class Game {
       // 商店：3 件明码标价，让局内金币有真实用途
       return [0, 1, 2].map(i => {
         const item = rollRunItem(luck, this.runItems)
-        const price = Math.round(([28, 45, 70][item.tier] + this.depth * 6) * this.curses.shopMul)
+        const price = Math.round(([28, 45, 70][item.tier] + this.depth * 6) * this.curses.shopMul * this.asc.shopMul)
         return { x: ROOM_W / 2 + (i - 1) * 110, y: cy, item, act: null, price, kind: 'gold' as const, taken: false }
       })
     }
@@ -671,7 +685,7 @@ export class Game {
       // 恶魔房：用生命换强力道具，稀有度拉高
       return [0, 1].map(i => {
         const item = rollRunItem(luck + 45, this.runItems)
-        return { x: ROOM_W / 2 + (i === 0 ? -80 : 80), y: cy, item, act: null, price: 22 + this.depth * 3, kind: 'hp' as const, taken: false }
+        return { x: ROOM_W / 2 + (i === 0 ? -80 : 80), y: cy, item, act: null, price: Math.round((22 + this.depth * 3) * this.asc.devilCostMul), kind: 'hp' as const, taken: false }
       })
     }
     if (r.type === 'angel') {
@@ -692,7 +706,7 @@ export class Game {
     }
     if (r.type === 'vault') {
       // 宝库：三件一口价，给「攒钱不花」的玩家一个爆发出口
-      const price = 90 + this.depth * 22
+      const price = Math.round((90 + this.depth * 22) * this.curses.shopMul * this.asc.shopMul)
       return [0, 1, 2].map(i => ({
         x: ROOM_W / 2 + (i - 1) * 110, y: cy,
         item: rollRunItem(luck + 40, this.runItems), act: null,
@@ -704,7 +718,7 @@ export class Game {
       return [0, 1, 2].map(i => ({
         x: ROOM_W / 2 + (i - 1) * 110, y: cy,
         item: rollRunItem(luck + 30 + i * 30, this.runItems), act: null,
-        price: 14 + i * 12 + this.depth * 2, kind: 'hp' as const, taken: false,
+        price: Math.round((14 + i * 12 + this.depth * 2) * this.asc.devilCostMul), kind: 'hp' as const, taken: false,
       }))
     }
     // 普通房有概率出现诅咒祭坛：接受一条永久诅咒，换一件高稀有度道具
@@ -844,7 +858,7 @@ export class Game {
     // 不给的话审计显示玩家等效生命全程零增长，而敌人伤害是递增的。
     const before = this.maxHp
     this.maxHp = this.computeMaxHp()
-    this.hp = Math.min(this.maxHp, this.hp + (this.maxHp - before) + this.maxHp * 0.2)
+    this.hp = Math.min(this.maxHp, this.hp + (this.maxHp - before) + this.maxHp * this.asc.descendHeal)
     const th = themeFor(this.depth)
     this.float(this.px, this.py - 30, `第 ${this.depth} 层 · ${th.name}`, '#ffd75e', 13)
     this.float(this.px, this.py - 44, `生命上限 +${DEPTH_HP_BONUS}`, '#7de37d', 10)
@@ -882,6 +896,9 @@ export class Game {
         break
       case 'armory':
         this.updateArmory()
+        break
+      case 'ascension':
+        this.updateAscension()
         break
       case 'victory':
         this.updateVictory()
@@ -979,6 +996,7 @@ export class Game {
     const nearForge = dist2(this.px, this.py, FORGE.x, FORGE.y) < 24 * 24
     const nearStatue = dist2(this.px, this.py, STATUE.x, STATUE.y) < 24 * 24
     const nearArmory = dist2(this.px, this.py, ARMORY.x, ARMORY.y) < 24 * 24
+    const nearTrial = dist2(this.px, this.py, TRIAL.x, TRIAL.y) < 24 * 24
 
     // 传送门粒子
     if (chance(0.5)) {
@@ -993,9 +1011,11 @@ export class Game {
     if (Input.pressed('i')) { this.state = 'inventory'; return }
     if (Input.pressed('c')) { this.state = 'charselect'; return }
     if (Input.pressed('v')) { this.state = 'armory'; return }
+    if (Input.pressed('t')) { this.state = 'ascension'; return }
     if (Input.pressed('e')) {
       if (nearStatue) { this.state = 'charselect'; return }
       if (nearArmory) { this.state = 'armory'; return }
+      if (nearTrial) { this.state = 'ascension'; return }
       if (nearPortal) {
         // 有未完成的存档就接着打，否则开新的一局
         if (this.pendingRun) {
@@ -1297,9 +1317,9 @@ export class Game {
   spawnEnemyAt(kind: EnemyKind, x: number, y: number): Enemy {
     const base = ENEMY_BASE[kind]
     // 强度按楼层深度递增（房间制下不再按存活时间）
-    const hpScale = 1 + (this.depth - 1) * ENEMY_HP_SCALE
-    const dmgScale = 1 + (this.depth - 1) * ENEMY_DMG_SCALE
-    const spdScale = 1 + (this.depth - 1) * ENEMY_SPD_SCALE
+    const hpScale = (1 + (this.depth - 1) * ENEMY_HP_SCALE) * this.asc.enemyHp
+    const dmgScale = (1 + (this.depth - 1) * ENEMY_DMG_SCALE) * this.asc.enemyDmg
+    const spdScale = (1 + (this.depth - 1) * ENEMY_SPD_SCALE) * this.asc.enemySpd
     const e: Enemy = {
       id: this.eid++, kind,
       x, y,
@@ -2061,6 +2081,13 @@ export class Game {
   recordWin() {
     if (this.winRecorded) return
     this.winRecorded = true
+    // 通关本层级 -> 解锁下一层级
+    if (!this.profile.ascClears.includes(this.runAsc)) this.profile.ascClears.push(this.runAsc)
+    if (this.runAsc >= this.profile.ascMax && this.profile.ascMax < MAX_ASCENSION) {
+      this.profile.ascMax = this.runAsc + 1
+      const nx = ascLevelInfo(this.profile.ascMax)
+      if (nx) this.float(this.px, this.py - 58, `解锁试炼 ${nx.level}：${nx.name}`, '#ff4f6b', 12)
+    }
     const b = this.profile.best
     b.wins++
     b.depth = Math.max(b.depth || 0, this.depth)
@@ -2667,6 +2694,36 @@ export class Game {
         this.hubSay(`金币不足（需要 ${w.cost}）`)
         sfx.hurt()
       }
+      return
+    }
+  }
+
+  // ================================================================
+  // 试炼层级选择
+  // ================================================================
+  ascRects(): { x: number; y: number; w: number; h: number }[] {
+    const cols = 8, cw = 66, chh = 52, gap = 6
+    const total = cw * cols + gap * (cols - 1)
+    const x0 = (VW - total) / 2
+    const y0 = 78
+    return Array.from({ length: MAX_ASCENSION + 1 }, (_, i) => ({
+      x: x0 + (i % cols) * (cw + gap),
+      y: y0 + Math.floor(i / cols) * (chh + gap),
+      w: cw, h: chh,
+    }))
+  }
+
+  updateAscension() {
+    if (Input.pressed('escape') || Input.pressed('t')) { this.state = 'hub'; return }
+    if (!Input.mclick) return
+    const rects = this.ascRects()
+    for (let i = 0; i <= MAX_ASCENSION; i++) {
+      const r = rects[i]
+      if (Input.mx < r.x || Input.mx > r.x + r.w || Input.my < r.y || Input.my > r.y + r.h) continue
+      if (i > this.profile.ascMax) { this.hubSay('需要先通关上一层级'); sfx.hurt(); return }
+      this.profile.asc = i
+      saveProfile(this.profile)
+      sfx.pickup()
       return
     }
   }

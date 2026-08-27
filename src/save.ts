@@ -20,6 +20,12 @@ export interface Profile {
   secondaries: string[]
   /** 当前选中的副武器 */
   secondary: string
+  /** 当前选择的试炼层级（0 = 普通） */
+  asc: number
+  /** 已解锁的最高试炼层级 */
+  ascMax: number
+  /** 每个层级是否已通关，用于陈列 */
+  ascClears: number[]
   /** 已达成的成就 id */
   achs: string[]
   /** 成就统计口径 */
@@ -42,6 +48,9 @@ export function emptyProfile(): Profile {
     char: 'knight',
     secondaries: ['shotgun'],
     secondary: 'shotgun',
+    asc: 0,
+    ascMax: 0,
+    ascClears: [],
     achs: [],
     ach: emptyAchStats(),
   }
@@ -64,6 +73,9 @@ export function loadProfile(): Profile {
         char: p.char || base.char,
         secondaries: Array.isArray(p.secondaries) && p.secondaries.length ? p.secondaries : base.secondaries,
         secondary: p.secondary || base.secondary,
+        asc: typeof p.asc === 'number' ? p.asc : 0,
+        ascMax: typeof p.ascMax === 'number' ? p.ascMax : 0,
+        ascClears: Array.isArray(p.ascClears) ? p.ascClears : [],
         achs: Array.isArray(p.achs) ? p.achs : [],
         // 逐字段合并：新增统计项时老档不会缺键
         ach: { ...base.ach, ...(p.ach || {}), bosses: Array.isArray(p.ach?.bosses) ? p.ach!.bosses : [] },
@@ -91,7 +103,8 @@ const RUN_KEY = 'pxsurv-run'
 // v3: 增加 curseIds / endless（缺失会让诅咒凭空消失、无尽模式退回通关判定）
 // v4: 增加 devilDeals / winRecorded（缺失会导致天使房误判、通关奖励可被读档重复领取）
 // v5: 增加 secId（缺失会让读档后副武器回落成霰弹）
-const RUN_VER = 5
+// v6: 增加 asc（缺失会让读档后试炼层级归零，等于白送难度减免）
+const RUN_VER = 6
 
 export interface SavedRoom {
   gx: number; gy: number; type: string
@@ -110,6 +123,7 @@ export interface RunSave {
   v: number
   charId: string
   secId: string
+  asc: number
   depth: number
   curKey: string
   startKey: string

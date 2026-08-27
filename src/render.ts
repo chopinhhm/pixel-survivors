@@ -4,6 +4,7 @@
 // 通过 import type 引用 Game，编译后类型被抹除，因此不构成运行时循环依赖。
 import type { Game } from './game'
 import { SECONDARIES } from './weapons'
+import { ASCENSIONS, MAX_ASCENSION, ascLevelInfo, computeAsc } from './ascension'
 import type { EnemyKind, Ob } from './consts'
 import { OB_CELL } from './layouts'
 import { SPR, FLOOR, makeEmblem } from './sprites'
@@ -20,7 +21,7 @@ import { ACHIEVEMENTS } from './achievements'
 import { getChar } from './chars'
 import {
   VW, VH, ROOM_W, ROOM_H, FINAL_DEPTH,
-  HUB, PORTAL, STASH, FORGE, STATUE, ARMORY, FORGE_COST,
+  HUB, PORTAL, STASH, FORGE, STATUE, ARMORY, TRIAL, FORGE_COST,
   BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_DRAW_SCALE, ENEMY_BASE, themeFor,
   OX, OY, WALL, DOOR_HALF, OBX, OBY, ROOM_MOOD, CHAMP_BY_ID,
 } from './consts'
@@ -621,6 +622,21 @@ export function drawHub(gm: Game) {
   g.fillRect(Math.round(W(ARMORY.x) - 6), Math.round(H(ARMORY.y) - 4), 12, 3)
   g.fillRect(Math.round(W(ARMORY.x) - 6), Math.round(H(ARMORY.y) + 2), 12, 3)
 
+  // ---- 试炼碑 ----
+  shadow(gm, W(TRIAL.x), H(TRIAL.y) + 8, 9)
+  {
+    const lit = gm.profile.asc > 0
+    glow(gm, W(TRIAL.x), H(TRIAL.y), 14, lit ? '#ff4f6b' : '#5c6285', 0.35)
+    g.fillStyle = '#2a1620'
+    g.fillRect(Math.round(W(TRIAL.x) - 7), Math.round(H(TRIAL.y) - 10), 14, 20)
+    g.strokeStyle = lit ? '#ff4f6b' : '#5c6285'
+    g.strokeRect(Math.round(W(TRIAL.x) - 7) + 0.5, Math.round(H(TRIAL.y) - 10) + 0.5, 13, 19)
+    g.textAlign = 'center'
+    g.font = 'bold 8px monospace'
+    g.fillStyle = lit ? '#ff4f6b' : '#5c6285'
+    g.fillText(String(gm.profile.asc), Math.round(W(TRIAL.x)), Math.round(H(TRIAL.y) + 3))
+  }
+
   // ---- 角色雕像（选择角色）----
   shadow(gm, W(STATUE.x), H(STATUE.y) + 8, 9)
   glow(gm, W(STATUE.x), H(STATUE.y) - 2, 14, gm.runChar.color, 0.35)
@@ -663,6 +679,8 @@ export function drawHub(gm: Game) {
   label(STATUE.x, STATUE.y - 22, `雕像 · 角色(${gm.runChar.name})`, nearStatue, gm.runChar.color)
   const nearArmory = dist2(gm.px, gm.py, ARMORY.x, ARMORY.y) < 24 * 24
   label(ARMORY.x, ARMORY.y - 20, `军械库 · 副武器(${gm.secondary.name})`, nearArmory, gm.secondary.color)
+  const nearTrial = dist2(gm.px, gm.py, TRIAL.x, TRIAL.y) < 24 * 24
+  label(TRIAL.x, TRIAL.y - 20, `试炼碑 · ${gm.profile.asc === 0 ? '普通难度' : `第 ${gm.profile.asc} 级`}`, nearTrial, gm.profile.asc > 0 ? '#ff4f6b' : '#9aa4c8')
 
   // ---- HUD ----
   g.textAlign = 'left'
@@ -680,7 +698,7 @@ export function drawHub(gm: Game) {
   }
   g.textAlign = 'right'
   g.fillStyle = '#5c6285'
-  g.fillText('WASD 移动 · E 交互 · I 背包 · C 角色 · V 军械库', VW - 8, 18)
+  g.fillText('WASD 移动 · E 交互 · I 背包 · C 角色 · V 军械库 · T 试炼', VW - 8, 18)
 
   // 家园提示消息
   if (gm.hubMsgT > 0) {
@@ -763,6 +781,73 @@ export function drawArmory(gm: Game) {
     else if (owned) { g.fillStyle = '#9aa4c8'; g.fillText('点击装备', r.x + r.w / 2, r.y + r.h - 8) }
     else { g.fillStyle = afford ? '#ffd75e' : '#ff6b6b'; g.fillText(`${w.cost} 金币`, r.x + r.w / 2, r.y + r.h - 8) }
   })
+}
+
+export function drawAscension(gm: Game) {
+  const g = gm.g
+  g.fillStyle = 'rgba(7,7,13,0.94)'
+  g.fillRect(0, 0, VW, VH)
+  g.textAlign = 'center'
+  g.font = 'bold 15px monospace'
+  g.fillStyle = '#ff4f6b'
+  g.fillText('试 炼 层 级', VW / 2, 30)
+  g.font = '8px monospace'
+  g.fillStyle = '#9aa4c8'
+  g.fillText('每级叠加一条永久修正，通关当前层级才解锁下一级 · ESC / T 返回', VW / 2, 46)
+  g.font = '8px monospace'
+  g.fillStyle = '#57e6a0'
+  g.fillText(`已解锁至 ${gm.profile.ascMax} 级 / 共 ${MAX_ASCENSION} 级`, VW / 2, 62)
+
+  const rects = gm.ascRects()
+  for (let i = 0; i <= MAX_ASCENSION; i++) {
+    const r = rects[i]
+    const locked = i > gm.profile.ascMax
+    const sel = gm.profile.asc === i
+    const cleared = gm.profile.ascClears.includes(i)
+    const hover = Input.mx >= r.x && Input.mx <= r.x + r.w && Input.my >= r.y && Input.my <= r.y + r.h
+    g.fillStyle = sel ? '#3a1a24' : locked ? '#12141f' : '#171a2e'
+    g.fillRect(r.x, r.y, r.w, r.h)
+    g.strokeStyle = sel ? '#ff4f6b' : hover && !locked ? '#ffd75e' : '#3a3f66'
+    g.lineWidth = sel ? 2 : 1
+    g.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1)
+    g.lineWidth = 1
+    g.textAlign = 'center'
+    g.font = 'bold 11px monospace'
+    g.fillStyle = locked ? '#3a3f66' : sel ? '#ff4f6b' : '#ffffff'
+    g.fillText(i === 0 ? '普通' : `${i} 级`, r.x + r.w / 2, r.y + 16)
+    const info = ascLevelInfo(i)
+    g.font = '7px monospace'
+    g.fillStyle = locked ? '#2a2e4a' : '#9aa4c8'
+    if (info) wrapText(gm, info.name, r.x + r.w / 2, r.y + 28, r.w - 6, 8)
+    if (cleared) {
+      g.fillStyle = '#57e6a0'
+      g.font = 'bold 8px monospace'
+      g.fillText('✔', r.x + r.w / 2, r.y + r.h - 6)
+    } else if (locked) {
+      g.fillStyle = '#3a3f66'
+      g.font = '7px monospace'
+      g.fillText('未解锁', r.x + r.w / 2, r.y + r.h - 6)
+    }
+  }
+
+  // 当前层级下累积生效的全部修正
+  const sel = gm.profile.asc
+  g.textAlign = 'left'
+  g.font = 'bold 9px monospace'
+  g.fillStyle = '#ff4f6b'
+  const lx = 40
+  let ly = VH - 96
+  g.fillText(sel === 0 ? '普通难度：无附加修正' : `第 ${sel} 级生效中的修正：`, lx, ly)
+  ly += 12
+  g.font = '7px monospace'
+  let col = 0
+  for (const a of ASCENSIONS) {
+    if (a.level > sel) break
+    g.fillStyle = '#ffb0b0'
+    g.fillText(`${a.level}. ${a.name} — ${a.desc}`, lx + col * 290, ly)
+    ly += 9
+    if (ly > VH - 14) { ly = VH - 84; col++ }
+  }
 }
 
 export function drawMenu(gm: Game) {
@@ -854,6 +939,7 @@ export function draw(gm: Game) {
   if (gm.state === 'inventory') { drawHub(gm); drawInventory(gm); return }
   if (gm.state === 'charselect') { drawHub(gm); drawCharSelect(gm); return }
   if (gm.state === 'armory') { drawHub(gm); drawArmory(gm); return }
+  if (gm.state === 'ascension') { drawHub(gm); drawAscension(gm); return }
 
   // 房间制：相机固定，一屏一间，只有震动会偏移
   const sx = Math.round(gm.shake > 0 ? rand(-3, 3) * gm.shake : 0)
@@ -1409,6 +1495,13 @@ export function drawHud(gm: Game) {
   g.fillStyle = '#ffffff'
   g.fillStyle = gm.endless ? '#b98cff' : gm.depth >= FINAL_DEPTH ? '#ff4f6b' : '#ffffff'
   const th = themeFor(gm.depth)
+  if (gm.runAsc > 0) {
+    g.fillStyle = '#ff4f6b'
+    g.font = '8px monospace'
+    g.fillText(`试炼 ${gm.runAsc} 级`, 4, 50)
+    g.font = 'bold 10px monospace'
+    g.fillStyle = '#ffffff'
+  }
   g.fillText(gm.endless ? `无尽 · 第 ${gm.depth} 层 · ${th.name}` : `第 ${gm.depth}/${FINAL_DEPTH} 层 · ${th.name}`, 4, 14)
   // 诅咒计数：接受过的诅咒是持续压力，必须常驻可见
   if (gm.runCurses.length) {
