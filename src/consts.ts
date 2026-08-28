@@ -12,6 +12,14 @@ export const ENEMY_DRAW_SCALE: Record<string, number> = {
   shieldbearer: 1.5, charger: 1.4, tether: 1.15,
 }
 
+/**
+ * 渲染超采样倍数。逻辑坐标仍是 VW x VH，但画布实际为 VW*SS x VH*SS。
+ * 试玩反馈「画质太低看不清」的根因：640x360 直接拉到 1080p, 文字被放大成马赛克。
+ * SS=3 时全屏 1080p 恰好 1:1 像素映射，文字与矢量图形完全清晰；
+ * 像素贴图仍按逻辑尺寸绘制，保留像素风。
+ */
+export const SS = 3
+
 export const VW = 640
 export const VH = 360
 
@@ -227,6 +235,10 @@ export interface Shot {
   targetId: number
   /** 武器自带的命中爆炸系数（火箭筒），与道具爆炸叠加 */
   explode: number
+  /** 弹体形态：由发射武器类型决定，渲染据此画完全不同的形状 */
+  style: 'ball' | 'pellet' | 'dart' | 'bolt' | 'ion' | 'magic' | 'rocket'
+  /** 弹体主色（武器色优先于道具词条色） */
+  color: string
 }
 export interface EProj { x: number; y: number; vx: number; vy: number; dmg: number; life: number; r: number; color: string }
 export interface Gem { x: number; y: number; val: number; vx: number; vy: number }

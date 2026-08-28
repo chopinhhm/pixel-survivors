@@ -23,7 +23,7 @@ import * as R from './render'
 
 // 常量与类型集中在 consts.ts，避免 render.ts 反向依赖 game.ts 造成运行时循环
 import {
-  ENEMY_DRAW_SCALE, VW, VH, ROOM_W, ROOM_H, OX, OY, DOOR_HALF, WALL,
+  ENEMY_DRAW_SCALE, VW, VH, SS, ROOM_W, ROOM_H, OX, OY, DOOR_HALF, WALL,
   OBX, OBY, CROSS_COL, CROSS_ROW, ROOM_MOOD,
   HUB, PORTAL, STASH, FORGE, STATUE, ARMORY, TRIAL, FORGE_COST,
   FINAL_DEPTH, BOSSES, BOSS_BY_ID, ENEMY_ANIM, ENEMY_TINT, ENEMY_BASE,
@@ -189,8 +189,9 @@ export class Game {
   spikeCd = 0 // 尖刺伤害间隔
 
   constructor() {
-    this.cv.width = VW
-    this.cv.height = VH
+    // 画布按 SS 倍超采样，draw 时统一 setTransform 缩放，逻辑坐标不变
+    this.cv.width = VW * SS
+    this.cv.height = VH * SS
     this.g.imageSmoothingEnabled = false
   }
 
@@ -281,7 +282,11 @@ export class Game {
   }
 
   /** 渲染入口。实现在 render.ts，这里只做转发以保持 main.ts 的调用方式 */
-  draw() { R.draw(this) }
+  draw() {
+    this.g.setTransform(SS, 0, 0, SS, 0, 0)
+    R.draw(this)
+    this.g.setTransform(1, 0, 0, 1, 0, 0)
+  }
 
   reset() {
     this.t = 0; this.kills = 0; this.shake = 0
@@ -1834,6 +1839,19 @@ export class Game {
       this.meleeSwing(use)
       return
     }
+    // 枪口闪光与后坐粒子: 不同武器开火"手感"从这里开始区分
+    {
+      const a0 = this.aimAngle
+      const mx = this.px + Math.cos(a0) * 12, my = this.py + Math.sin(a0) * 12
+      const n0 = use.cls === 'shotgun' ? 8 : use.cls === 'launcher' ? 6 : 3
+      for (let i = 0; i < n0; i++) {
+        const sa = a0 + rand(-0.5, 0.5)
+        this.parts.push({ x: mx, y: my, vx: Math.cos(sa) * rand(40, 110), vy: Math.sin(sa) * rand(40, 110),
+          life: 0.14, maxLife: 0.14, color: use.color, size: use.cls === 'launcher' ? 2 : 1 })
+      }
+      if (use.cls === 'sniper' || use.cls === 'launcher') this.shake = Math.max(this.shake, 0.22)
+      if (use.cls === 'shotgun') this.shake = Math.max(this.shake, 0.16)
+    }
     // 武器弹幕 × 道具修饰：弹数与散布相加，伤害与弹速相乘
     const n = use.count + Math.floor(st.count)
     const base = this.aimAngle
@@ -1900,6 +1918,9 @@ export class Game {
       hit: new Set(),
       targetId: -1,
       explode: wp?.explode || 0,
+      // 每类武器有专属弹体形态与颜色：霰弹碎粒/弩箭飞镖/离子长条/法杖魔球/火箭弹头
+      style: wp ? ({ pistol: 'ball', shotgun: 'pellet', smg: 'dart', sniper: 'bolt', launcher: 'rocket', laser: 'ion', staff: 'magic', melee: 'ball' } as const)[wp.cls] : 'ball',
+      color: wp ? wp.color : this.shotColor,
     })
   }
 
@@ -1984,6 +2005,15 @@ export class Game {
   /** 弹体命中敌人时结算所有附加效果 */
   onShotHit(p: Shot, e: Enemy, st: RunStats) {
     this.damage(e, p.dmg)
+    // 命中溅射: 沿弹道方向喷武器色粒子, 狙击/火箭额外顿帧
+    const hitAng = Math.atan2(p.vy, p.vx)
+    const nSpark = p.style === 'bolt' || p.style === 'rocket' ? 7 : 3
+    for (let i = 0; i < nSpark; i++) {
+      const sa = hitAng + rand(-0.7, 0.7)
+      this.parts.push({ x: e.x, y: e.y, vx: Math.cos(sa) * rand(30, 90), vy: Math.sin(sa) * rand(30, 90),
+        life: 0.2, maxLife: 0.2, color: p.color, size: 1 })
+    }
+    if (p.style === 'bolt') this.hitStop = Math.max(this.hitStop, 0.03)
     if (chance(0.3)) sfx.hit()
 
     // 点燃
@@ -2438,7 +2468,7 @@ export class Game {
             x: this.px, y: this.py,
             vx: Math.cos(sa) * 300, vy: Math.sin(sa) * 300,
             dmg: dmg / 3, life: 0.32, pierce: st.pierce, bounce: 0, split: 0,
-            size: 3, hit: new Set(), targetId: -1, explode: 0,
+            size: 3, hit: new Set(), targetId: -1, explode: 0, style: 'pellet' as const, color: w.color,
           })
         }
         this.shake = 0.35
@@ -2595,6 +2625,7 @@ export class Game {
           this.slots[1] = picked
           this.slotIdx = 1
           this.removeGroundWeapon(gw)
+          this.float(this.px, this.py - 36, '按 Tab 或 X 切换武器', '#57c7ff', 10)
         } else {
           // 交换：手里这把丢回地上（初始手枪直接丢弃，不占地面）
           const old = this.gun

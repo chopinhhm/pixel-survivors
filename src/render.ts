@@ -1382,16 +1382,79 @@ export function draw(gm: Game) {
     g.restore()
   }
 
-  // 主武器弹体：颜色随词条变化，带辉光与拖尾
-  const shotCol = gm.shotColor
+  // 主武器弹体：形态由武器类型决定（试玩反馈"不同武器只是换颜色"）
   for (const p of gm.shots) {
-    glow(gm, W(p.x), H(p.y), p.size * 3.2, shotCol, 0.5)
-    g.fillStyle = shotCol
-    g.beginPath(); g.arc(W(p.x), H(p.y), p.size, 0, Math.PI * 2); g.fill()
-    g.fillStyle = '#ffffff'
-    g.beginPath(); g.arc(W(p.x) - p.size * 0.25, H(p.y) - p.size * 0.25, p.size * 0.42, 0, Math.PI * 2); g.fill()
-    if (chance(0.35)) {
-      gm.parts.push({ x: p.x, y: p.y, vx: 0, vy: 0, life: 0.18, maxLife: 0.18, color: shotCol, size: 1 })
+    const col = p.color
+    const ang = Math.atan2(p.vy, p.vx)
+    switch (p.style) {
+      case 'pellet': // 霰弹碎粒：小而密，无辉光（省性能，弹量大）
+        g.fillStyle = col
+        g.beginPath(); g.arc(W(p.x), H(p.y), Math.max(1.5, p.size * 0.6), 0, Math.PI * 2); g.fill()
+        break
+      case 'dart': { // 冲锋枪飞镖：细长条沿弹道
+        g.save(); g.translate(W(p.x), H(p.y)); g.rotate(ang)
+        g.fillStyle = col
+        g.fillRect(-4, -1, 8, 2)
+        g.fillStyle = '#ffffff'
+        g.fillRect(2, -1, 2, 2)
+        g.restore()
+        break
+      }
+      case 'bolt': { // 狙击弩箭：长杆 + 强拖尾
+        glow(gm, W(p.x), H(p.y), p.size * 2.6, col, 0.5)
+        g.save(); g.translate(W(p.x), H(p.y)); g.rotate(ang)
+        g.fillStyle = col
+        g.fillRect(-9, -1.5, 18, 3)
+        g.fillStyle = '#ffffff'
+        g.beginPath(); g.moveTo(9, 0); g.lineTo(4, -3); g.lineTo(4, 3); g.closePath(); g.fill()
+        g.restore()
+        if (chance(0.8)) gm.parts.push({ x: p.x, y: p.y, vx: 0, vy: 0, life: 0.22, maxLife: 0.22, color: col, size: 1 })
+        break
+      }
+      case 'ion': { // 离子束：亮芯长条 + 加色辉光
+        g.save(); g.globalCompositeOperation = 'lighter'
+        g.translate(W(p.x), H(p.y)); g.rotate(ang)
+        g.fillStyle = col; g.globalAlpha = 0.5
+        g.fillRect(-8, -2.5, 16, 5)
+        g.fillStyle = '#ffffff'; g.globalAlpha = 1
+        g.fillRect(-6, -1, 12, 2)
+        g.restore()
+        break
+      }
+      case 'magic': { // 法杖魔球：旋转菱形 + 环形微粒
+        glow(gm, W(p.x), H(p.y), p.size * 3, col, 0.55)
+        g.save(); g.translate(W(p.x), H(p.y)); g.rotate(gm.frameT * 6 + p.x)
+        g.fillStyle = col
+        g.fillRect(-p.size * 0.8, -p.size * 0.8, p.size * 1.6, p.size * 1.6)
+        g.restore()
+        if (chance(0.4)) {
+          const oa = rand(Math.PI * 2)
+          gm.parts.push({ x: p.x + Math.cos(oa) * p.size * 1.6, y: p.y + Math.sin(oa) * p.size * 1.6,
+            vx: 0, vy: 0, life: 0.2, maxLife: 0.2, color: col, size: 1 })
+        }
+        break
+      }
+      case 'rocket': { // 火箭：弹头 + 持续喷焰尾迹
+        glow(gm, W(p.x), H(p.y), p.size * 3, col, 0.5)
+        g.save(); g.translate(W(p.x), H(p.y)); g.rotate(ang)
+        g.fillStyle = '#c8c8d8'
+        g.fillRect(-6, -3, 10, 6)
+        g.fillStyle = col
+        g.beginPath(); g.moveTo(8, 0); g.lineTo(4, -3); g.lineTo(4, 3); g.closePath(); g.fill()
+        g.restore()
+        gm.parts.push({ x: p.x - Math.cos(ang) * 7, y: p.y - Math.sin(ang) * 7,
+          vx: -Math.cos(ang) * 30 + rand(-12, 12), vy: -Math.sin(ang) * 30 + rand(-12, 12),
+          life: 0.3, maxLife: 0.3, color: chance(0.5) ? '#ffd75e' : '#ff7f3f', size: 2 })
+        break
+      }
+      default: { // 手枪/默认圆弹
+        glow(gm, W(p.x), H(p.y), p.size * 3.2, col, 0.5)
+        g.fillStyle = col
+        g.beginPath(); g.arc(W(p.x), H(p.y), p.size, 0, Math.PI * 2); g.fill()
+        g.fillStyle = '#ffffff'
+        g.beginPath(); g.arc(W(p.x) - p.size * 0.25, H(p.y) - p.size * 0.25, p.size * 0.42, 0, Math.PI * 2); g.fill()
+        if (chance(0.35)) gm.parts.push({ x: p.x, y: p.y, vx: 0, vy: 0, life: 0.18, maxLife: 0.18, color: col, size: 1 })
+      }
     }
   }
 
@@ -1449,7 +1512,36 @@ export function draw(gm: Game) {
     // 玩家身前的朝向小箭头
     const ind = 16
     glow(gm, W(gm.px + Math.cos(aimA) * ind), H(gm.py + Math.sin(aimA) * ind), 5, '#57c7ff', 0.5)
-    // 准星：开火时收拢并染成弹体颜色，让"我正在射击"一眼可见
+    // 敌人方向指示：屏幕内没剩几只时，给屏幕边缘画指向剩余敌人的箭头
+  // （试玩反馈「不知道哪里有怪，找半天」—— 尤其打漏一两只躲在角落时）
+  if (gm.state === 'play' && gm.room && !gm.room.cleared) {
+    const alive = gm.enemies.filter(e => !e.dead)
+    if (alive.length > 0 && alive.length <= 4) {
+      for (const e of alive) {
+        const sx = W(e.x), sy = H(e.y)
+        // 已经在可视区内的不用指
+        if (sx > 24 && sx < VW - 24 && sy > 60 && sy < VH - 40) continue
+        const ang = Math.atan2(e.y - gm.py, e.x - gm.px)
+        const ax = W(gm.px) + Math.cos(ang) * 70
+        const ay = H(gm.py) + Math.sin(ang) * 70
+        g.save()
+        g.translate(ax, ay)
+        g.rotate(ang)
+        g.globalAlpha = 0.55 + Math.sin(gm.frameT * 5) * 0.25
+        g.fillStyle = '#ff6b6b'
+        g.beginPath(); g.moveTo(9, 0); g.lineTo(-4, -5); g.lineTo(-4, 5); g.closePath(); g.fill()
+        g.restore()
+      }
+      g.globalAlpha = 1
+    }
+    // 剩余敌人计数常驻（房间未清时）
+    g.textAlign = 'center'
+    g.font = 'bold 9px monospace'
+    g.fillStyle = alive.length <= 2 ? '#ffd75e' : '#9aa4c8'
+    g.fillText(`剩余 ${alive.length}`, VW / 2, 32)
+  }
+
+  // 准星：开火时收拢并染成弹体颜色，让"我正在射击"一眼可见
     const firing = Input.mdown && gm.state === 'play'
     const gap = firing ? 2 : 3
     const arm = firing ? 6 : 8
@@ -1783,7 +1875,7 @@ export function drawHud(gm: Game) {
     g.fillStyle = '#9aa4c8'
     g.fillText(`能量 ${Math.round(gm.energy)}`, 4 + ew + 4, VH - 31)
   }
-  // 武器槽（左下，当前高亮；Tab/X 切换）
+  // 武器槽（左下，当前高亮）
   {
     let wx = 4
     const wy = VH - 58
@@ -1805,6 +1897,13 @@ export function drawHud(gm: Game) {
       }
       wx += 56
     })
+    // 双枪时常驻标注切换键（试玩反馈"不知道怎么切换武器"）
+    if (gm.slots[1]) {
+      g.textAlign = 'left'
+      g.font = '7px monospace'
+      g.fillStyle = '#57c7ff'
+      g.fillText('Tab/X 切换', wx + 2, wy + 10)
+    }
   }
 
   // 副武器槽（冲刺条上方）

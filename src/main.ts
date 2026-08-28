@@ -10,7 +10,8 @@ let scale = 1, ox = 0, oy = 0
 function resize() {
   disp.width = innerWidth
   disp.height = innerHeight
-  scale = Math.max(1, Math.floor(Math.min(innerWidth / VW, innerHeight / VH)))
+  // 源画布是 3x 超采样，非整数缩放也能干净降采样 —— 不再限制整数倍，尽量撑满屏幕
+  scale = Math.max(1, Math.min(innerWidth / VW, innerHeight / VH))
   ox = Math.floor((innerWidth - VW * scale) / 2)
   oy = Math.floor((innerHeight - VH * scale) / 2)
 }
@@ -47,10 +48,10 @@ function start() {
     last = now
     game.update(dt)
     game.draw()
-    dctx.imageSmoothingEnabled = false
+    dctx.imageSmoothingEnabled = true
     dctx.fillStyle = '#07070d'
     dctx.fillRect(0, 0, disp.width, disp.height)
-    dctx.drawImage(game.cv, ox, oy, VW * scale, VH * scale)
+    dctx.drawImage(game.cv, 0, 0, game.cv.width, game.cv.height, ox, oy, VW * scale, VH * scale)
     Input.flush()
     requestAnimationFrame(frame)
   }
