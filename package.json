@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "check": "tsc --noEmit",
+    "verify": "tsc --noEmit && node scripts/verify.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {

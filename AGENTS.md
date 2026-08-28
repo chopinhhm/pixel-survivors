@@ -25,6 +25,7 @@ npm run dev          # Vite 开发服务器，默认 http://localhost:5173
 
 ```bash
 npm run check        # tsc --noEmit 类型检查（改完代码必跑）
+npm run verify       # 类型检查 + 完整性检查（状态机/实体渲染覆盖/存档字段对齐），上线前必跑
 npm run build        # 产物在 dist/，纯静态，任意 HTTP 服务器可托管
 ```
 
@@ -111,7 +112,7 @@ node /tmp/t/xxx.js   # 自己写断言脚本 require 这些模块
 - 服务器接入：`ssh -i ~/.ssh/skill-market-deploy ubuntu@124.221.92.107`（密钥在开发机上）
 - 静态文件位置：`/var/www/pixel-survivors/`；nginx 配置在 `/etc/nginx/sites-available/skill-market` 的 `/game/` location（改动前先备份，`nginx -t` 通过再 reload）
 
-更新线上版本：
+更新线上版本（**先 `npm run verify` 通过再部署**）：
 
 ```bash
 npx vite build --base=./          # 必须用相对 base，子路径部署下绝对路径会 404

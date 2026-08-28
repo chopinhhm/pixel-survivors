@@ -1294,6 +1294,94 @@ export function draw(gm: Game) {
     }
   }
 
+  // ---- 地上的武器（可拾取） ----
+  for (const gw of gm.groundWeapons) {
+    const w = getWeapon(gw.id)
+    const bob = Math.sin(gm.frameT * 3 + gw.x) * 2
+    glow(gm, W(gw.x), H(gw.y) + bob, 14, w.color, 0.5)
+    shadow(gm, W(gw.x), H(gw.y) + 8, 6)
+    g.save()
+    g.translate(W(gw.x), H(gw.y) + bob)
+    g.rotate(-0.5)
+    g.fillStyle = w.color
+    g.fillRect(-8, -2, 16, 4)
+    g.fillStyle = '#26233a'
+    g.fillRect(2, -1, 5, 2)
+    g.restore()
+    if (dist2(gw.x, gw.y, gm.px, gm.py) < 18 * 18) {
+      g.textAlign = 'center'
+      g.font = 'bold 8px monospace'
+      g.fillStyle = w.color
+      g.fillText(`${w.name} · 按 E ${gm.slots[1] ? '交换' : '拾取'}`, W(gw.x), H(gw.y) - 16)
+      g.font = '7px monospace'
+      g.fillStyle = '#9aa4c8'
+      g.fillText(w.desc, W(gw.x), H(gw.y) - 7)
+    }
+  }
+
+  // ---- 近战挥砍弧（兽形利爪用自己的参数与配色） ----
+  if (gm.swingT > 0) {
+    const w = gm.gun
+    const k = 1 - gm.swingT / 0.16
+    const beast = gm.beastT > 0
+    const reach = beast ? 52 : (w.reach || 34)
+    const arc = beast ? 2.3 : (w.arc || 1.6)
+    g.save()
+    g.globalCompositeOperation = 'lighter'
+    g.globalAlpha = (1 - k) * 0.8
+    g.strokeStyle = beast ? '#ff4f6b' : w.color
+    g.lineWidth = 4
+    g.beginPath()
+    g.arc(W(gm.px), H(gm.py), reach, gm.swingAng - arc / 2 + arc * k * 0.6, gm.swingAng + arc / 2 - arc * (1 - k) * 0.2)
+    g.stroke()
+    g.restore()
+    g.lineWidth = 1
+  }
+
+  // ---- 副武器实体 ----
+  for (const bm of gm.beams) {
+    const a = bm.life / 0.18
+    g.save()
+    g.globalCompositeOperation = 'lighter'
+    for (const [lw, al] of [[9, 0.25], [4, 0.6], [1.5, 1]] as [number, number][]) {
+      g.strokeStyle = bm.color
+      g.globalAlpha = a * al
+      g.lineWidth = lw
+      g.beginPath(); g.moveTo(W(bm.x1), H(bm.y1)); g.lineTo(W(bm.x2), H(bm.y2)); g.stroke()
+    }
+    g.restore()
+    g.lineWidth = 1
+  }
+  for (const gr of gm.grenades) {
+    glow(gm, W(gr.x), H(gr.y), 12, '#7de37d', 0.5)
+    g.fillStyle = '#3a5a2a'
+    g.beginPath(); g.arc(W(gr.x), H(gr.y), 4, 0, Math.PI * 2); g.fill()
+    if (gr.fuse < 0.35 && Math.floor(gm.frameT * 14) % 2 === 0) {
+      g.fillStyle = '#ffd75e'
+      g.beginPath(); g.arc(W(gr.x), H(gr.y), 6, 0, Math.PI * 2); g.fill()
+    }
+  }
+  for (const mn of gm.mines) {
+    const armed = mn.arm <= 0
+    glow(gm, W(mn.x), H(mn.y), 14, armed ? '#e05a4f' : '#5c6285', 0.4)
+    g.fillStyle = '#3a2a2a'
+    g.beginPath(); g.arc(W(mn.x), H(mn.y), 5, 0, Math.PI * 2); g.fill()
+    g.strokeStyle = armed ? '#e05a4f' : '#5c6285'
+    g.beginPath(); g.arc(W(mn.x), H(mn.y), 9, 0, Math.PI * 2); g.stroke()
+    if (armed && Math.floor(gm.frameT * 4) % 2 === 0) {
+      g.fillStyle = '#e05a4f'
+      g.beginPath(); g.arc(W(mn.x), H(mn.y), 2, 0, Math.PI * 2); g.fill()
+    }
+  }
+  for (const bo of gm.boomers) {
+    glow(gm, W(bo.x), H(bo.y), 12, '#ffd75e', 0.45)
+    g.save()
+    g.translate(W(bo.x), H(bo.y))
+    g.rotate(bo.ang)
+    g.drawImage(SPR.knife, -5, -1)
+    g.restore()
+  }
+
   // 主武器弹体：颜色随词条变化，带辉光与拖尾
   const shotCol = gm.shotColor
   for (const p of gm.shots) {

@@ -1209,6 +1209,8 @@ export class Game {
 
   /** 走到道具台上就拿走（以撒式：直接生效，无菜单）；收费台需要付得起 */
   updatePedestal() {
+    // 兽形冲进宝箱房乱撞时不应把道具/诅咒「撞」进背包
+    if (this.beastT > 0) return
     for (const p of this.pedestals) {
       if (p.taken) continue
       if (dist2(p.x, p.y, this.px, this.py) >= 13 * 13) continue
@@ -2868,6 +2870,11 @@ export class Game {
 
   // ---------- 宝箱：走上去开箱，直接给一件强化（以撒式，无菜单）----------
   updateChests(dt: number) {
+    if (this.beastT > 0) {
+      // 开箱动画仍要推进, 只是不触发新的开箱
+      for (const c of this.chests) if (c.opened > 0 && c.opened < 1) c.opened = Math.min(1, c.opened + dt * 4)
+      return
+    }
     for (const c of this.chests) {
       if (c.opened) continue
       if (dist2(c.x, c.y, this.px, this.py) < 14 * 14) {
