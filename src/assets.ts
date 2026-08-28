@@ -50,7 +50,8 @@ export async function loadAssets(): Promise<void> {
   const jobs: Promise<void>[] = []
   for (const [key, files] of Object.entries(MANIFEST)) {
     jobs.push(
-      Promise.all(files.map(f => loadImg('/sprites/' + f))).then(imgs => {
+      // BASE_URL 跟随 vite --base：部署到子路径（如 /game/）时写死 /sprites/ 会 404
+      Promise.all(files.map(f => loadImg(import.meta.env.BASE_URL + 'sprites/' + f))).then(imgs => {
         ANIM[key] = imgs
         ANIM_FLIP[key] = imgs.map(flip)
       }),

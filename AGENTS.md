@@ -103,6 +103,26 @@ node /tmp/t/xxx.js   # 自己写断言脚本 require 这些模块
 - 音效没有单独的近战/弹反音、拾取武器音。
 - 无移动端适配（触屏没有输入路径）。
 
+## 线上部署
+
+游戏已部署在腾讯云轻量服务器（与「技能集市」共用一台，nginx 同站不同路径）：
+
+- **游玩地址**：`http://124.221.92.107/game/`
+- 服务器接入：`ssh -i ~/.ssh/skill-market-deploy ubuntu@124.221.92.107`（密钥在开发机上）
+- 静态文件位置：`/var/www/pixel-survivors/`；nginx 配置在 `/etc/nginx/sites-available/skill-market` 的 `/game/` location（改动前先备份，`nginx -t` 通过再 reload）
+
+更新线上版本：
+
+```bash
+npx vite build --base=./          # 必须用相对 base，子路径部署下绝对路径会 404
+tar -czf /tmp/pxsurv-dist.tar.gz -C dist .
+scp -i ~/.ssh/skill-market-deploy /tmp/pxsurv-dist.tar.gz ubuntu@124.221.92.107:/tmp/
+ssh -i ~/.ssh/skill-market-deploy ubuntu@124.221.92.107   'sudo tar -xzf /tmp/pxsurv-dist.tar.gz -C /var/www/pixel-survivors && rm /tmp/pxsurv-dist.tar.gz'
+```
+
+注意：素材加载走 `import.meta.env.BASE_URL`（见 `assets.ts`），新增静态资源时不要写死以 `/` 开头的绝对路径。
+同机跑着技能集市生产服务（sm-app/sm-mysql/sm-redis），部署动作只允许触碰 `/var/www/pixel-survivors` 与 nginx 的 `/game/` 段。
+
 ## 提交规范
 
 - 直接提交到 `main` 并推送（单人项目，无分支流程）。

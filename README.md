@@ -3,6 +3,8 @@
 浏览器端 roguelite：元气骑士式武器拾取 × 以撒式房间探索。
 纯 TypeScript + Canvas，零后端零引擎，打开即玩。
 
+**在线试玩**：http://124.221.92.107/game/
+
 ```bash
 npm install && npm run dev   # http://localhost:5173
 ```
