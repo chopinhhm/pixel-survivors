@@ -1063,12 +1063,50 @@ export function draw(gm: Game) {
   }
 
   // 道具台（宝箱房 1 个 / 商店 3 个 / 恶魔房 2 个）
+  // 商人 NPC：商店房里站个人，比一排货架有温度
+  if (gm.room && gm.room.type === 'shop') {
+    const kx = W(ROOM_W / 2), ky = H(48)
+    const kbob = Math.sin(gm.frameT * 2) * 1.5
+    shadow(gm, kx, ky + 13, 7)
+    glow(gm, kx, ky, 22, '#57e6a0', 0.22)
+    const kimg = frame('player_idle', Math.floor(gm.frameT * 4) % 4, false) as CanvasImageSource
+    g.filter = 'hue-rotate(120deg) saturate(1.5) brightness(1.05)'
+    g.drawImage(kimg, Math.round(kx - 8), Math.round(ky - 14 + kbob))
+    g.filter = 'none'
+    // 头顶金币图标，表明这是买卖的地方
+    g.fillStyle = '#ffd75e'
+    g.beginPath(); g.arc(kx, ky - 22 + kbob, 4, 0, Math.PI * 2); g.fill()
+    g.fillStyle = '#8a6a1e'
+    g.font = 'bold 6px monospace'
+    g.textAlign = 'center'
+    g.fillText('$', kx, ky - 19.5 + kbob)
+    g.font = '7px monospace'
+    g.fillStyle = '#57e6a0'
+    g.fillText('看看有什么合意的', kx, ky - 30 + kbob)
+  }
+
   for (const ped of gm.pedestals) {
     if (ped.taken) continue
     const bob = Math.sin(gm.frameT * 3 + ped.x) * 2
-    const col = ped.item ? ped.item.color : ped.act!.color
-    const name = ped.item ? ped.item.name : ped.act!.name
-    const desc = ped.item ? ped.item.desc : ped.act!.desc
+    // 商店扩展后台子上未必有 item/act（武器/补给/刷新台两者皆空），
+    // 直接取 ped.act!.color 会抛异常并黑屏 —— 必须按类型分派
+    let col: string, name: string, desc: string
+    if (ped.reroll) {
+      col = '#57e6a0'; name = '刷新货架'; desc = `花 ${ped.price} 金币换一批新货`
+    } else if (ped.weaponId) {
+      const w = getWeapon(ped.weaponId)
+      col = w.color; name = w.name; desc = w.desc
+    } else if (ped.supply === 'heal') {
+      col = '#ff6b6b'; name = '急救包'; desc = '回复 40% 生命上限'
+    } else if (ped.supply === 'energy') {
+      col = '#57c7ff'; name = '能量电池'; desc = '能量补满'
+    } else if (ped.item) {
+      col = ped.item.color; name = ped.item.name; desc = ped.item.desc
+    } else if (ped.act) {
+      col = ped.act.color; name = ped.act.name; desc = ped.act.desc
+    } else {
+      continue // 兜底：不该出现的空台子直接跳过，绝不崩渲染
+    }
     // 台座：诅咒祭坛画成暗色方尖碑，和普通道具台明确区分
     if (ped.kind === 'curse') {
       g.fillStyle = '#1a1020'
@@ -1085,9 +1123,47 @@ export function draw(gm: Game) {
     }
     // 悬浮图标（主动技能多一圈光晕以示区别）
     glow(gm, W(ped.x), H(ped.y) - 6 + bob, ped.act ? 24 : 18, col, 0.6)
-    const icon = ped.item ? itemIcon(gm, ped.item) : actIcon(gm, ped.act!)
-    const isc = 2
-    g.drawImage(icon, Math.round(W(ped.x) - icon.width * isc / 2), Math.round(H(ped.y) - 10 + bob - icon.height * isc / 2), icon.width * isc, icon.height * isc)
+    if (ped.item || ped.act) {
+      const icon = ped.item ? itemIcon(gm, ped.item) : actIcon(gm, ped.act!)
+      const isc = 2
+      g.drawImage(icon, Math.round(W(ped.x) - icon.width * isc / 2), Math.round(H(ped.y) - 10 + bob - icon.height * isc / 2), icon.width * isc, icon.height * isc)
+    } else if (ped.weaponId) {
+      // 武器：画成枪形剪影
+      g.save()
+      g.translate(W(ped.x), H(ped.y) - 10 + bob)
+      g.rotate(-0.45)
+      g.fillStyle = col
+      g.fillRect(-11, -3, 22, 6)
+      g.fillStyle = '#26233a'
+      g.fillRect(3, -1.5, 7, 3)
+      g.restore()
+    } else if (ped.supply === 'heal') {
+      // 急救包：红十字
+      const cx2 = W(ped.x), cy2 = H(ped.y) - 10 + bob
+      g.fillStyle = '#e8e8f0'
+      g.fillRect(cx2 - 9, cy2 - 7, 18, 14)
+      g.fillStyle = '#ff4f6b'
+      g.fillRect(cx2 - 2, cy2 - 5, 4, 10)
+      g.fillRect(cx2 - 6, cy2 - 1, 12, 4)
+    } else if (ped.supply === 'energy') {
+      // 电池
+      const cx2 = W(ped.x), cy2 = H(ped.y) - 10 + bob
+      g.fillStyle = '#1d3a4a'
+      g.fillRect(cx2 - 7, cy2 - 9, 14, 18)
+      g.fillStyle = '#57c7ff'
+      g.fillRect(cx2 - 5, cy2 - 7 + 14 * 0.15, 10, 14 * 0.7)
+      g.fillStyle = '#9aa4c8'
+      g.fillRect(cx2 - 3, cy2 - 12, 6, 3)
+    } else if (ped.reroll) {
+      // 刷新：循环箭头
+      const cx2 = W(ped.x), cy2 = H(ped.y) - 10 + bob
+      g.strokeStyle = col
+      g.lineWidth = 2.5
+      g.beginPath(); g.arc(cx2, cy2, 8, 0.6, Math.PI * 1.7); g.stroke()
+      g.lineWidth = 1
+      g.fillStyle = col
+      g.beginPath(); g.moveTo(cx2 + 9, cy2 - 6); g.lineTo(cx2 + 3, cy2 - 7); g.lineTo(cx2 + 7, cy2 + 1); g.closePath(); g.fill()
+    }
     g.textAlign = 'center'
     g.font = 'bold 8px monospace'
     g.fillStyle = col
@@ -1121,6 +1197,12 @@ export function draw(gm: Game) {
       g.font = 'bold 9px monospace'
       g.fillStyle = afford ? '#ffd75e' : '#ff6b6b'
       g.fillText(`${ped.price} 金币`, W(ped.x), H(ped.y) + 34)
+      // 特价标签：让「这次进店值不值」一眼可判
+      if (ped.sale) {
+        g.font = 'bold 8px monospace'
+        g.fillStyle = Math.floor(gm.frameT * 4) % 2 === 0 ? '#ff4f6b' : '#ffd75e'
+        g.fillText(`特价 -${Math.round(ped.sale * 100)}%`, W(ped.x), H(ped.y) + 44)
+      }
     } else if (ped.kind === 'hp') {
       g.font = 'bold 9px monospace'
       g.fillStyle = '#ff4f6b'

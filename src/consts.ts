@@ -265,6 +265,15 @@ export interface Pedestal {
   taken: boolean
   /** kind==='curse' 时附带的诅咒 */
   curse?: Curse | null
+  // ---- 商店扩展 ----
+  /** 出售的可拾取武器 id（商店此前只卖被动道具，14 把武器买不到） */
+  weaponId?: string
+  /** 补给类商品：回血 / 补能量 */
+  supply?: 'heal' | 'energy'
+  /** 刷新台：花钱换一批新货 */
+  reroll?: boolean
+  /** 打折标签：本次进店随机一件特价 */
+  sale?: number
 }
 
 export const ENEMY_BASE: Record<EnemyKind, { hp: number; spd: number; dmg: number; r: number; xp: number; scale: number }> = {

@@ -751,12 +751,63 @@ export class Game {
       return [{ x: ROOM_W / 2, y: cy, item: rollRunItem(luck, this.runItems), act: null, price: 0, kind: 'free', taken: false }]
     }
     if (r.type === 'shop') {
-      // 商店：3 件明码标价，让局内金币有真实用途
-      return [0, 1, 2].map(i => {
+      // 商店：混合货架 + 刷新台。
+      // 此前只卖被动道具，14 把可拾取武器只能靠打精英/Boss 掉 —— 金币的用途太窄，
+      // 想「买把趁手的枪」办不到。现在四个货位覆盖四类需求：道具 / 武器 / 补给 / 主动技能。
+      const mul = this.curses.shopMul * this.asc.shopMul
+      const list: Pedestal[] = []
+      const xs = [-165, -55, 55, 165]
+
+      // 货位 1-2：被动道具（老本行）
+      for (let i = 0; i < 2; i++) {
         const item = rollRunItem(luck, this.runItems)
-        const price = Math.round(([28, 45, 70][item.tier] + this.depth * 6) * this.curses.shopMul * this.asc.shopMul)
-        return { x: ROOM_W / 2 + (i - 1) * 110, y: cy, item, act: null, price, kind: 'gold' as const, taken: false }
+        list.push({
+          x: ROOM_W / 2 + xs[i], y: cy, item, act: null,
+          price: Math.round(([28, 45, 70][item.tier] + this.depth * 6) * mul),
+          kind: 'gold' as const, taken: false,
+        })
+      }
+
+      // 货位 3：可拾取武器 —— 稀有度随层数走，深层能买到好枪
+      {
+        const w = rollWeapon(this.depth >= 4 ? 1 : 0, luck + this.depth * 3)
+        list.push({
+          x: ROOM_W / 2 + xs[2], y: cy, item: null, act: null,
+          price: Math.round(([55, 95, 150][w.tier] + this.depth * 8) * mul),
+          kind: 'gold' as const, taken: false, weaponId: w.id,
+        })
+      }
+
+      // 货位 4：补给或主动技能 —— 没主动技能时优先卖技能，否则卖补给
+      if (!this.active && chance(0.55)) {
+        const act = rollActive()
+        list.push({
+          x: ROOM_W / 2 + xs[3], y: cy, item: null, act,
+          price: Math.round((85 + this.depth * 10) * mul),
+          kind: 'gold' as const, taken: false,
+        })
+      } else {
+        const lowHp = this.hp < this.maxHp * 0.6
+        const supply: 'heal' | 'energy' = lowHp || chance(0.6) ? 'heal' : 'energy'
+        list.push({
+          x: ROOM_W / 2 + xs[3], y: cy, item: null, act: null,
+          price: Math.round((supply === 'heal' ? 40 + this.depth * 6 : 30 + this.depth * 4) * mul),
+          kind: 'gold' as const, taken: false, supply,
+        })
+      }
+
+      // 随机一件特价：给「这次进店值不值得花钱」制造波动
+      const saleIdx = Math.floor(Math.random() * list.length)
+      const off = pick([0.25, 0.3, 0.4])
+      list[saleIdx].sale = off
+      list[saleIdx].price = Math.max(1, Math.round(list[saleIdx].price * (1 - off)))
+
+      // 刷新台：不满意可以花钱换一批，价格随次数递增
+      list.push({
+        x: ROOM_W / 2, y: cy + 74, item: null, act: null,
+        price: Math.round(35 * mul), kind: 'gold' as const, taken: false, reroll: true,
       })
+      return list
     }
     if (r.type === 'devil') {
       // 恶魔房：用生命换强力道具，稀有度拉高
@@ -1239,6 +1290,25 @@ export class Game {
           sfx.boss()
         }
       }
+      // 刷新台：花钱换一批新货，价格随次数递增，不占货位
+      if (p.reroll) {
+        if (this.runGold < p.price) {
+          if (this.frameT % 0.5 < 0.02) this.float(p.x, p.y - 30, `刷新需要 ${p.price} 金币`, '#ff6b6b', 8)
+          continue
+        }
+        this.runGold -= p.price
+        const fresh = this.makePedestals(this.room)
+        // 保留刷新台自身并抬价，防止无限低价洗货
+        const nextPrice = Math.round(p.price * 1.6)
+        for (const q of fresh) if (q.reroll) q.price = nextPrice
+        this.roomPeds.set(this.curKey, fresh)
+        this.pedestals = fresh
+        this.burst(p.x, p.y, '#57e6a0', 20)
+        this.float(p.x, p.y - 26, '换了一批新货！', '#57e6a0', 11)
+        sfx.pickup()
+        return
+      }
+
       // 付费判定：付不起就提示，不消耗
       if (p.kind === 'gold') {
         if (this.runGold < p.price) {
@@ -1264,11 +1334,33 @@ export class Game {
       }
 
       p.taken = true
-      const col = p.item ? p.item.color : p.act!.color
-      const name = p.item ? p.item.name : p.act!.name
-      const desc = p.item ? p.item.desc : p.act!.desc
-      if (p.item) this.addRunItem(p.item)
-      else { this.active = p.act; this.activeCharge = 0 }
+      let col: string, name: string, desc: string
+      if (p.weaponId) {
+        // 买枪：空槽直接入槽，满槽则替换当前手持（旧枪落地，还能反悔捡回来）
+        const w = getWeapon(p.weaponId)
+        col = w.color; name = w.name; desc = w.desc
+        if (!this.slots[1]) { this.slots[1] = w; this.slotIdx = 1 }
+        else {
+          const old = this.gun
+          this.slots[this.slotIdx] = w
+          if (old.id !== 'wpistol') this.groundWeapons.push({ x: p.x, y: p.y + 18, id: old.id })
+        }
+        if (!this.slots[1]) this.float(p.x, p.y - 34, '按 Tab 或 X 切换武器', '#57c7ff', 9)
+      } else if (p.supply === 'heal') {
+        const heal = Math.round(this.maxHp * 0.4)
+        this.hp = Math.min(this.maxHp, this.hp + heal)
+        col = '#ff6b6b'; name = '急救包'; desc = `回复 ${heal} 点生命`
+        sfx.heal()
+      } else if (p.supply === 'energy') {
+        this.energy = this.maxEnergy
+        col = '#57c7ff'; name = '能量电池'; desc = '能量补满'
+      } else {
+        col = p.item ? p.item.color : p.act!.color
+        name = p.item ? p.item.name : p.act!.name
+        desc = p.item ? p.item.desc : p.act!.desc
+        if (p.item) this.addRunItem(p.item)
+        else { this.active = p.act; this.activeCharge = 0 }
+      }
 
       this.burst(p.x, p.y, col, 22)
       this.float(p.x, p.y - 22, `获得 ${name}！`, col, 11)
