@@ -106,7 +106,8 @@ const RUN_KEY = 'pxsurv-run'
 // v6: 增加 asc（缺失会让读档后试炼层级归零，等于白送难度减免）
 // v7: 增加 slotIds/slotIdx/energy（武器拾取制：缺失会让读档丢失捡到的武器）
 // v8: 增加 rage/beastT/fatigueT（缺失可用「变身末尾退出重进」跳过虚弱期惩罚）
-const RUN_VER = 8
+// v9: SavedPed 增加 weaponId/supply/reroll/sale（缺失会让读档后进商店购买时崩溃）
+const RUN_VER = 9
 
 export interface SavedRoom {
   gx: number; gy: number; type: string
@@ -119,6 +120,12 @@ export interface SavedPed {
   itemId: string | null; actId: string | null
   curseId: string | null
   price: number; kind: string; taken: boolean
+  // 商店扩展字段。漏存会让读档后的商店台子退化成「item 与 act 都为 null」的空台子，
+  // 购买时直接空指针崩溃 —— Pedestal 新增可选字段时必须同步到这里（verify 会自动检查）。
+  weaponId?: string
+  supply?: string
+  reroll?: boolean
+  sale?: number
 }
 
 export interface RunSave {

@@ -55,5 +55,34 @@ for (const f of fields) {
 }
 if (fail === f5) ok(`RunSave ${fields.length} 个字段均有读写`)
 
+// 6) Pedestal 字段必须纳入 SavedPed，且 game.ts 的快照/还原都要读写
+//    （真实事故：商店新增 weaponId/supply/reroll 未同步到存档，
+//     读档后商店台子退化成 item 与 act 皆为 null，走上去购买直接空指针崩溃）
+// 字段可能写成 `a: X; b: Y` 挤在一行，按行拆分号后再取标识符，否则会误报
+const declFields = block => block
+  .split('\n')
+  .filter(l => !l.trim().startsWith('//') && !l.trim().startsWith('*') && !l.trim().startsWith('/*'))
+  .flatMap(l => l.split(';'))
+  .map(seg => seg.trim().match(/^(\w+)\??:/))
+  .filter(Boolean)
+  .map(m => m[1])
+
+const pedBlock = consts.match(/export interface Pedestal \{([\s\S]*?)\n\}/)[1]
+const pedFields = declFields(pedBlock)
+const savedPedBlock = save.match(/export interface SavedPed \{([\s\S]*?)\n\}/)[1]
+const savedFields = declFields(savedPedBlock)
+const alias = { item: 'itemId', act: 'actId', curse: 'curseId' }
+let f6 = fail
+for (const f of pedFields) {
+  if (f === 'x' || f === 'y') continue
+  const want = alias[f] || f
+  if (!savedFields.includes(want)) {
+    bad(`Pedestal.${f} 未纳入 SavedPed —— 读档后该字段丢失，商店台子会退化并可能崩溃`)
+  } else if (!game.includes(`p.${want}`) && !game.includes(`${want}: p.${f}`)) {
+    bad(`SavedPed.${want} 在 game.ts 的快照/还原中未见读写`)
+  }
+}
+if (fail === f6) ok(`Pedestal ${pedFields.length} 个字段均已纳入存档并有读写`)
+
 console.log(fail ? `\n共 ${fail} 处问题` : '\n全部通过')
 process.exit(fail ? 1 : 0)

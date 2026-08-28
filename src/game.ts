@@ -437,6 +437,7 @@ export class Game {
           actId: p.act ? p.act.id : null,
           curseId: p.curse ? p.curse.id : null,
           price: p.price, kind: p.kind, taken: p.taken,
+          weaponId: p.weaponId, supply: p.supply, reroll: p.reroll, sale: p.sale,
         }))] as [string, any[]]),
     }
     saveRun(snap)
@@ -506,6 +507,7 @@ export class Game {
         act: p.actId ? (ACTIVE_BY_ID.get(p.actId) ?? null) : null,
         curse: p.curseId ? (CURSE_BY_ID.get(p.curseId) ?? null) : null,
         price: p.price, kind: p.kind as Pedestal['kind'], taken: p.taken,
+        weaponId: p.weaponId, supply: p.supply as Pedestal['supply'], reroll: p.reroll, sale: p.sale,
       })))
     }
 
@@ -1290,10 +1292,19 @@ export class Game {
           sfx.boss()
         }
       }
-      // 刷新台：花钱换一批新货，价格随次数递增，不占货位
+      // 刷新台：花钱换一批新货，价格随次数递增，不占货位。
+      // 🔴 必须按 E 触发：道具台是「走上去即拾取」，但刷新可重复，
+      // 若沿用接触触发，站在台子上会每帧扣一次钱，几帧内金币被榨干。
       if (p.reroll) {
+        if (!Input.pressed('e')) {
+          if (this.frameT % 0.6 < 0.02) {
+            this.float(p.x, p.y - 30, `按 E 刷新（${p.price} 金币）`, this.runGold >= p.price ? '#57e6a0' : '#ff6b6b', 8)
+          }
+          continue
+        }
         if (this.runGold < p.price) {
-          if (this.frameT % 0.5 < 0.02) this.float(p.x, p.y - 30, `刷新需要 ${p.price} 金币`, '#ff6b6b', 8)
+          this.float(p.x, p.y - 30, `刷新需要 ${p.price} 金币`, '#ff6b6b', 9)
+          sfx.hurt()
           continue
         }
         this.runGold -= p.price
@@ -1339,13 +1350,15 @@ export class Game {
         // 买枪：空槽直接入槽，满槽则替换当前手持（旧枪落地，还能反悔捡回来）
         const w = getWeapon(p.weaponId)
         col = w.color; name = w.name; desc = w.desc
-        if (!this.slots[1]) { this.slots[1] = w; this.slotIdx = 1 }
+        const hadSecond = !!this.slots[1]
+        if (!hadSecond) { this.slots[1] = w; this.slotIdx = 1 }
         else {
           const old = this.gun
           this.slots[this.slotIdx] = w
           if (old.id !== 'wpistol') this.groundWeapons.push({ x: p.x, y: p.y + 18, id: old.id })
         }
-        if (!this.slots[1]) this.float(p.x, p.y - 34, '按 Tab 或 X 切换武器', '#57c7ff', 9)
+        // 首次拥有第二把枪时才提示切换键（此前写在赋值之后，条件恒假，提示从未出现过）
+        if (!hadSecond) this.float(p.x, p.y - 34, '按 Tab 或 X 切换武器', '#57c7ff', 9)
       } else if (p.supply === 'heal') {
         const heal = Math.round(this.maxHp * 0.4)
         this.hp = Math.min(this.maxHp, this.hp + heal)
@@ -1354,12 +1367,15 @@ export class Game {
       } else if (p.supply === 'energy') {
         this.energy = this.maxEnergy
         col = '#57c7ff'; name = '能量电池'; desc = '能量补满'
-      } else {
+      } else if (p.item || p.act) {
         col = p.item ? p.item.color : p.act!.color
         name = p.item ? p.item.name : p.act!.name
         desc = p.item ? p.item.desc : p.act!.desc
         if (p.item) this.addRunItem(p.item)
         else { this.active = p.act; this.activeCharge = 0 }
+      } else {
+        // 兜底：内容为空的台子（例如旧档字段缺失）直接作废，绝不因空指针崩掉整局
+        continue
       }
 
       this.burst(p.x, p.y, col, 22)
@@ -1369,7 +1385,8 @@ export class Game {
       this.shake = 0.4
       sfx.levelup()
       // 全部拿完才标记，商店可以分次买
-      if (this.pedestals.every(q => q.taken)) this.room.looted = true
+      // 刷新台永远 taken=false，不能让它把商店永远卡在「没买光」
+      if (this.pedestals.every(q => q.taken || q.reroll)) this.room.looted = true
     }
   }
 
