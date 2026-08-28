@@ -105,7 +105,8 @@ const RUN_KEY = 'pxsurv-run'
 // v5: 增加 secId（缺失会让读档后副武器回落成霰弹）
 // v6: 增加 asc（缺失会让读档后试炼层级归零，等于白送难度减免）
 // v7: 增加 slotIds/slotIdx/energy（武器拾取制：缺失会让读档丢失捡到的武器）
-const RUN_VER = 7
+// v8: 增加 rage/beastT/fatigueT（缺失可用「变身末尾退出重进」跳过虚弱期惩罚）
+const RUN_VER = 8
 
 export interface SavedRoom {
   gx: number; gy: number; type: string
@@ -128,6 +129,9 @@ export interface RunSave {
   slotIds: (string | null)[]
   slotIdx: number
   energy: number
+  rage: number
+  beastT: number
+  fatigueT: number
   depth: number
   curKey: string
   startKey: string

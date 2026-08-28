@@ -1233,7 +1233,30 @@ export function draw(gm: Game) {
 
   // 玩家（idle/run 各 4 帧，受击闪烁；冲刺时拉伸）
   const blink = gm.invuln > 0 && Math.floor(gm.frameT * 12) % 2 === 0
-  if (!blink) {
+  if (!blink && gm.beastT > 0) {
+    // ---- 狂战形态：借大恶魔贴图 + 红色气场 ----
+    const bf = Math.floor(gm.frameT * 10) % 4
+    const bimg = frame(gm.moving ? 'boss' : 'boss_idle', bf, gm.face < 0) as CanvasImageSource
+    const bw = (bimg as HTMLCanvasElement).width * 1.1
+    const bh = (bimg as HTMLCanvasElement).height * 1.1
+    shadow(gm, W(gm.px), H(gm.py) + 15, 11)
+    glow(gm, W(gm.px), H(gm.py), 26, '#ff4f6b', 0.35 + Math.sin(gm.frameT * 6) * 0.1)
+    // 剩 2 秒时闪烁预告变身将尽
+    if (gm.beastT < 2 && Math.floor(gm.frameT * 8) % 2 === 0) g.filter = 'brightness(1.8) saturate(0.4)'
+    else g.filter = 'hue-rotate(330deg) saturate(1.6) brightness(1.1)'
+    g.drawImage(bimg, Math.round(W(gm.px) - bw / 2), Math.round(H(gm.py) - bh + 8), bw, bh)
+    g.filter = 'none'
+    // 扛着的巨石画在头顶
+    if (gm.carriedRock) {
+      const ry = H(gm.py) - bh + 2 + Math.sin(gm.frameT * 3) * 1.5
+      g.fillStyle = '#5b5b74'
+      g.fillRect(Math.round(W(gm.px) - 9), Math.round(ry - 14), 18, 14)
+      g.fillStyle = '#6e6e8a'
+      g.fillRect(Math.round(W(gm.px) - 9), Math.round(ry - 14), 18, 4)
+      g.strokeStyle = '#2a2a3c'
+      g.strokeRect(Math.round(W(gm.px) - 9) + 0.5, Math.round(ry - 14) + 0.5, 17, 13)
+    }
+  } else if (!blink) {
     const key = gm.moving || gm.dashT > 0 ? 'player_run' : 'player_idle'
     const pf = Math.floor(gm.frameT * (gm.moving || gm.dashT > 0 ? 12 : 5)) % 4
     const pimg = frame(key, pf, gm.face < 0) as CanvasImageSource
@@ -1241,9 +1264,23 @@ export function draw(gm: Game) {
     // 无敌/冲刺的状态提示优先，其次才是角色色调
     if (gm.invuln > 0 && gm.dashT <= 0) g.filter = 'brightness(1.6)'
     else if (gm.dashT > 0) g.filter = 'brightness(1.4) saturate(1.6)'
+    else if (gm.fatigueT > 0) g.filter = 'grayscale(0.7) brightness(0.85)' // 虚弱：灰头土脸
     else if (gm.runChar.tint) g.filter = gm.runChar.tint
     g.drawImage(pimg, Math.round(W(gm.px) - 8), Math.round(H(gm.py) - 14))
     g.filter = 'none'
+  }
+
+  // 飞行中的巨石
+  for (const rk of gm.thrownRocks) {
+    shadow(gm, W(rk.x), H(rk.y) + 10, 7)
+    g.save()
+    g.translate(W(rk.x), H(rk.y))
+    g.rotate(gm.frameT * 9)
+    g.fillStyle = '#5b5b74'
+    g.fillRect(-7, -7, 14, 14)
+    g.fillStyle = '#6e6e8a'
+    g.fillRect(-7, -7, 14, 4)
+    g.restore()
   }
 
   // 环绕法球（数量与半径同步 updateWeapons，避免画的和打的不一致）
@@ -1339,6 +1376,12 @@ export function draw(gm: Game) {
     g.moveTo(ax, ay - arm); g.lineTo(ax, ay - gap)
     g.moveTo(ax, ay + gap); g.lineTo(ax, ay + arm)
     g.stroke()
+  }
+
+  // 虚弱期：屏幕边缘压灰，提示状态
+  if (gm.fatigueT > 0 && gm.state === 'play') {
+    g.fillStyle = `rgba(60,60,80,${Math.min(0.22, gm.fatigueT * 0.08)})`
+    g.fillRect(0, 0, VW, VH)
   }
 
   // 受击红闪 + 濒死警示边框
@@ -1619,6 +1662,23 @@ export function drawHud(gm: Game) {
     g.font = ready ? 'bold 7px monospace' : '7px monospace'
     g.fillStyle = ready ? gm.active.color : '#9aa4c8'
     g.fillText(ready ? 'Q 就绪' : `${gm.activeCharge}/${gm.active.charge}`, ax + 14, ay + 36)
+  }
+
+  // 怒气条（HP 上方细条；满了脉动提示按 R）
+  {
+    const rw = 70
+    const full = gm.rage >= 100
+    g.fillStyle = '#171a2e'
+    g.fillRect(4, VH - 44, rw, 4)
+    g.fillStyle = gm.beastT > 0 ? '#ff4f6b'
+      : full ? (Math.floor(gm.frameT * 6) % 2 === 0 ? '#ff4f6b' : '#ffd75e')
+      : '#b13e53'
+    const frac = gm.beastT > 0 ? gm.beastT / 9 : clamp(gm.rage / 100, 0, 1)
+    g.fillRect(4, VH - 44, rw * frac, 4)
+    g.textAlign = 'left'
+    g.font = full && gm.beastT <= 0 ? 'bold 6px monospace' : '6px monospace'
+    g.fillStyle = gm.beastT > 0 ? '#ff4f6b' : gm.fatigueT > 0 ? '#5c6285' : full ? '#ffd75e' : '#9aa4c8'
+    g.fillText(gm.beastT > 0 ? '狂战形态' : gm.fatigueT > 0 ? `虚弱 ${gm.fatigueT.toFixed(0)}s` : full ? '怒气已满 (R 变身)' : '怒气', 4 + rw + 4, VH - 40)
   }
 
   // 能量条（蓝条，武器弹药）

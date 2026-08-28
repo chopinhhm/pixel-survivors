@@ -117,6 +117,20 @@ export class Game {
   /** 近战挥砍动画剩余时间与朝向 */
   swingT = 0
   swingAng = 0
+
+  // ---- 怒气变身（狂战形态）----
+  /** 怒气 0~100，打怪与受伤积累，满了按 R 变身 */
+  rage = 0
+  /** 变身剩余时间；>0 即处于狂战形态 */
+  beastT = 0
+  /** 虚弱期剩余时间（变身结束后的代价） */
+  fatigueT = 0
+  /** 变身近战的攻击间隔 */
+  beastAtkT = 0
+  /** 扛在头上的石头（拔起的障碍物）；null = 空手 */
+  carriedRock: boolean = false
+  /** 投掷出去的石头 */
+  thrownRocks: { x: number; y: number; vx: number; vy: number; life: number; dmg: number }[] = []
   /** 掉在地上的武器（当前房间视图，实际按房间 key 存于 roomGuns） */
   groundWeapons: { x: number; y: number; id: string }[] = []
   roomGuns = new Map<string, { x: number; y: number; id: string }[]>()
@@ -198,7 +212,12 @@ export class Game {
   }
 
   // 角色 × 局内道具(stats) × 局外装备(eq) 三层叠加
-  get spd() { return 72 * this.runChar.spdMul * this.stats.moveSpd * (1 + this.eq.spd / 100) }
+  get spd() {
+    let v = 72 * this.runChar.spdMul * this.stats.moveSpd * (1 + this.eq.spd / 100)
+    if (this.beastT > 0) v *= this.carriedRock ? 1.0 : 1.25 // 兽形更快，扛石头抵消加速
+    else if (this.fatigueT > 0) v *= 0.78 // 虚弱期拖腿
+    return v
+  }
   get magnetR() { return 28 * this.stats.magnet * (1 + this.eq.magnet / 100) }
   get goldMul() { return this.stats.goldMul * (1 + this.eq.xp / 100) * this.curses.goldMul }
   get regen() { return this.stats.regen + this.eq.regen }
@@ -208,8 +227,13 @@ export class Game {
    * 不设下界的话叠几件就会变成受伤翻好几倍，等于被随机掉落废掉这一局。
    */
   get armorMul() {
-    return (1 - clamp(this.stats.armor + this.eq.armor / 100, -0.6, 0.7)) * this.curses.dmgTaken
+    let v = (1 - clamp(this.stats.armor + this.eq.armor / 100, -0.6, 0.7)) * this.curses.dmgTaken
+    if (this.beastT > 0) v *= 0.5      // 兽形皮糙肉厚
+    else if (this.fatigueT > 0) v *= 1.35 // 虚弱期更疼
+    return v
   }
+  /** 虚弱期输出打七折 */
+  get fatigueDmgMul() { return this.fatigueT > 0 ? 0.7 : 1 }
   /** 弹体颜色随已拾取词条变化，让 build 在视觉上可辨认 */
   get shotColor() {
     const s = this.stats
@@ -282,6 +306,8 @@ export class Game {
     this.slots = [START_WEAPON, null]; this.slotIdx = 0
     this.energy = 100; this.maxEnergy = 100
     this.swingT = 0; this.groundWeapons = []; this.roomGuns.clear()
+    this.rage = 0; this.beastT = 0; this.fatigueT = 0; this.beastAtkT = 0
+    this.carriedRock = false; this.thrownRocks = []
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.maxHp = this.computeMaxHp()
     this.hp = this.maxHp; this.invuln = 0
@@ -320,6 +346,7 @@ export class Game {
     this.enemies = []; this.shots = []; this.eprojs = []
     this.novas = []; this.bolts = []
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
+    this.thrownRocks = []
     this.gems = []; this.hearts = []; this.chests = []
     this.grid.clear()
     this.boss = null
@@ -371,6 +398,9 @@ export class Game {
       slotIds: this.slots.map(w => w ? w.id : null),
       slotIdx: this.slotIdx,
       energy: this.energy,
+      rage: this.rage,
+      beastT: this.beastT,
+      fatigueT: this.fatigueT,
       depth: this.depth,
       curKey: this.curKey,
       startKey: this.floor.startKey,
@@ -432,6 +462,11 @@ export class Game {
     this.slots = [getWeapon(s.slotIds?.[0] || undefined), s.slotIds?.[1] ? getWeapon(s.slotIds[1]!) : null]
     this.slotIdx = s.slotIdx === 1 && this.slots[1] ? 1 : 0
     this.energy = typeof s.energy === 'number' ? clamp(s.energy, 0, 100) : 100
+    this.rage = clamp(s.rage || 0, 0, 100)
+    // 变身中退出的读档直接进入虚弱期：变身是爆发窗口，跨会话保留没有意义且容易滥用
+    this.beastT = 0
+    this.fatigueT = s.beastT && s.beastT > 0 ? 4 : clamp(s.fatigueT || 0, 0, 4)
+    this.carriedRock = false; this.thrownRocks = []; this.beastAtkT = 0
     this.maxHp = this.computeMaxHp()
     this.hp = clamp(s.hp, 1, this.maxHp)
     this.active = s.activeId ? (ACTIVE_BY_ID.get(s.activeId) ?? null) : null
@@ -479,6 +514,8 @@ export class Game {
     this.slots = [START_WEAPON, null]; this.slotIdx = 0
     this.energy = 100; this.maxEnergy = 100
     this.swingT = 0; this.groundWeapons = []; this.roomGuns.clear()
+    this.rage = 0; this.beastT = 0; this.fatigueT = 0; this.beastAtkT = 0
+    this.carriedRock = false; this.thrownRocks = []
     this.grenades = []; this.mines = []; this.beams = []; this.boomers = []
     this.cloneT = 0; this.cloneFire = 0; this.freezeAll = 0; this.fearT = 0
     this.eid = 1
@@ -1139,9 +1176,16 @@ export class Game {
     }
     this.rebuildGrid()
     this.separateEnemies()
-    this.updateWeapons(dt)
-    this.updateGroundWeapons()
-    this.updateSecondary(dt)
+    this.updateBeast(dt)
+    if (this.beastT > 0) {
+      // 兽形：枪械/副武器/捡枪全部禁用，左键与 E 由 updateBeast 接管
+      this.updateThrownRocks(dt)
+    } else {
+      this.updateWeapons(dt)
+      this.updateGroundWeapons()
+      this.updateSecondary(dt)
+      this.updateThrownRocks(dt)
+    }
     this.updateFieldEffects(dt)
     this.updateShots(dt)
     this.updateEProjs(dt)
@@ -2010,6 +2054,7 @@ export class Game {
         this.shake = 0.4
         this.hurtFlash = 1
         this.hitStop = 0.06
+        if (this.beastT <= 0 && this.fatigueT <= 0) this.rage = Math.min(100, this.rage + 8)
         this.doRetaliate()
         sfx.hurt()
         this.float(this.px, this.py - 12, `-${Math.round(p.dmg)}`, '#ff4f6b', 9)
@@ -2041,7 +2086,9 @@ export class Game {
   // ---------- 伤害 / 击杀 ----------
   damage(e: Enemy, dmg: number, canCrit = true) {
     if (e.dead) return
-    let d = dmg
+    let d = dmg * this.fatigueDmgMul
+    // 打怪攒怒气（虚弱期与变身中不攒，防止无缝续变身）
+    if (this.beastT <= 0 && this.fatigueT <= 0) this.rage = Math.min(100, this.rage + 0.7)
     // 护盾变体：硬性减伤，逼玩家换目标或堆伤害
     if (e.champ === 'shielded') d *= 0.55
     // 石牢守卫石化期：只能打出零头，必须等窗口
@@ -2072,6 +2119,7 @@ export class Game {
     e.deathT = 0.18
     e.flash = 0.12
     this.kills++
+    if (this.beastT <= 0 && this.fatigueT <= 0) this.rage = Math.min(100, this.rage + 3)
     // 连击：2.5 秒内接着击杀就累积，里程碑给金币奖励
     this.combo++
     this.comboT = 2.5
@@ -2559,6 +2607,155 @@ export class Game {
     }
   }
 
+  // ================================================================
+  // 怒气变身：狂战形态
+  // ================================================================
+  updateBeast(dt: number) {
+    // R 触发变身（怒气满且不在虚弱期）
+    if (Input.pressed('r') && this.rage >= 100 && this.beastT <= 0 && this.fatigueT <= 0) {
+      this.rage = 0
+      this.beastT = 9
+      this.carriedRock = false
+      this.burst(this.px, this.py, '#ff4f6b', 40)
+      this.float(this.px, this.py - 34, '变 身 ！', '#ff4f6b', 16)
+      this.shake = 0.9
+      this.hitStop = 0.2
+      sfx.boss()
+      return
+    }
+
+    if (this.beastT > 0) {
+      this.beastT -= dt
+      this.beastAtkT = Math.max(0, this.beastAtkT - dt)
+
+      // 兽形气场粒子
+      if (chance(0.4)) {
+        this.parts.push({ x: this.px + rand(-10, 10), y: this.py + rand(-12, 4), vx: rand(-6, 6), vy: -22, life: 0.4, maxLife: 0.4, color: '#ff4f6b', size: 1 })
+      }
+
+      // 左键：扛着石头则投掷，空手则利爪近战
+      if (Input.mdown && this.beastAtkT <= 0) {
+        if (this.carriedRock) {
+          this.beastAtkT = 0.5
+          this.throwRock()
+        } else {
+          this.beastAtkT = 0.34
+          this.beastClaw()
+        }
+      }
+
+      // E：拔起脚边的石头障碍物扛在头上
+      if (Input.pressed('e') && !this.carriedRock) {
+        const col = Math.floor((this.aimX - OBX) / OB_CELL)
+        const row = Math.floor((this.aimY - OBY) / OB_CELL)
+        let target = this.obAt(col, row)
+        if (!target || target.kind !== 'rock') {
+          // 准星没指到就找脚边最近的石头
+          let bd = 42 * 42
+          for (const o of this.obs) {
+            if (o.kind !== 'rock') continue
+            const d = dist2(this.obCenterX(o), this.obCenterY(o), this.px, this.py)
+            if (d < bd) { bd = d; target = o }
+          }
+        }
+        if (target && target.kind === 'rock'
+            && dist2(this.obCenterX(target), this.obCenterY(target), this.px, this.py) < 46 * 46) {
+          // 从地形里拔掉这块石头
+          const list = this.roomObs.get(this.curKey)
+          if (list) { const i = list.indexOf(target); if (i >= 0) list.splice(i, 1) }
+          this.obGrid[target.row * OB_COLS + target.col] = null
+          this.carriedRock = true
+          this.burst(this.obCenterX(target), this.obCenterY(target), '#8a8aa0', 14)
+          this.float(this.px, this.py - 26, '举起巨石！', '#c8c8d8', 10)
+          this.shake = 0.3
+          sfx.hit()
+        }
+      }
+
+      // 变身结束 → 虚弱期
+      if (this.beastT <= 0) {
+        this.beastT = 0
+        this.fatigueT = 4
+        this.carriedRock = false
+        this.float(this.px, this.py - 30, '虚弱……', '#9aa4c8', 12)
+        this.hurtFlash = 0.5
+        sfx.lose()
+      }
+    } else if (this.fatigueT > 0) {
+      this.fatigueT -= dt
+      if (this.fatigueT <= 0) {
+        this.fatigueT = 0
+        this.float(this.px, this.py - 26, '恢复了', '#57e6a0', 10)
+        sfx.heal()
+      }
+    }
+  }
+
+  /** 兽形利爪：大弧度近战 + 强击退，伤害吃道具加成 */
+  beastClaw() {
+    const st = this.stats
+    this.swingT = 0.16
+    this.swingAng = this.aimAngle
+    const reach = 52
+    const arc = 2.3
+    const dmg = 26 * st.dmg
+    let hitAny = false
+    this.forEachNear(this.px, this.py, reach + 14, e => {
+      if (e.dead) return
+      const d = Math.sqrt(dist2(e.x, e.y, this.px, this.py))
+      if (d > reach + e.r) return
+      const ang = Math.atan2(e.y - this.py, e.x - this.px)
+      const diff = Math.abs(((ang - this.swingAng + Math.PI * 3) % (Math.PI * 2)) - Math.PI)
+      if (diff > arc / 2) return
+      hitAny = true
+      this.damage(e, dmg)
+      if (!e.dead && e.kind !== 'boss') {
+        e.x += Math.cos(ang) * 18
+        e.y += Math.sin(ang) * 18
+      }
+    })
+    if (hitAny) { this.shake = Math.max(this.shake, 0.3); this.hitStop = Math.max(this.hitStop, 0.03) }
+    sfx.shoot()
+  }
+
+  /** 把扛着的石头砸向准星：大范围 AoE */
+  throwRock() {
+    this.carriedRock = false
+    const a = this.aimAngle
+    this.thrownRocks.push({
+      x: this.px, y: this.py - 10,
+      vx: Math.cos(a) * 330, vy: Math.sin(a) * 330,
+      life: 0.9,
+      dmg: 60 * this.stats.dmg,
+    })
+    this.shake = 0.3
+    sfx.shoot()
+  }
+
+  updateThrownRocks(dt: number) {
+    for (const r of this.thrownRocks) {
+      r.x += r.vx * dt
+      r.y += r.vy * dt
+      r.life -= dt
+      // 命中敌人 / 出界 / 到时 → 落地爆裂
+      let boom = r.life <= 0 || r.x < 6 || r.x > ROOM_W - 6 || r.y < 6 || r.y > ROOM_H - 6
+      if (!boom) {
+        this.forEachNear(r.x, r.y, 16, e => {
+          if (!boom && !e.dead && dist2(e.x, e.y, r.x, r.y) < (10 + e.r) ** 2) boom = true
+        })
+      }
+      if (boom) {
+        r.life = 0
+        this.novas.push({ x: r.x, y: r.y, r: 6, maxR: 74, dmg: r.dmg, hit: new Set() })
+        this.burst(r.x, r.y, '#8a8aa0', 26)
+        this.shake = 0.55
+        this.hitStop = 0.06
+        sfx.boom()
+      }
+    }
+    this.thrownRocks = this.thrownRocks.filter(r => r.life > 0)
+  }
+
   /** 受击反制：对周围敌人造成一圈伤害 */
   doRetaliate() {
     const r = this.stats.retaliate
@@ -2630,6 +2827,7 @@ export class Game {
       this.shake = 0.5
       this.hurtFlash = 1
       this.hitStop = 0.07 // 受击顿帧，强化"被打到"的实感
+      if (this.beastT <= 0 && this.fatigueT <= 0) this.rage = Math.min(100, this.rage + 8)
       this.doRetaliate()
       sfx.hurt()
       this.float(this.px, this.py - 12, `-${Math.round(h.dmg)}`, '#ff4f6b', 9)
