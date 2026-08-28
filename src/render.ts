@@ -306,16 +306,21 @@ export function drawCharSelect(gm: Game) {
 /** 右上角小地图 */
 export function drawMinimap(gm: Game) {
   const g = gm.g
-  const cell = 9, gap = 2
+  // 放大 + 图例 + 状态标记：小地图要能直接回答「下一步去哪」
+  const cell = 13, gap = 2
   let minX = 99, maxX = -99, minY = 99, maxY = -99
   for (const r of gm.floor.rooms.values()) {
     minX = Math.min(minX, r.gx); maxX = Math.max(maxX, r.gx)
     minY = Math.min(minY, r.gy); maxY = Math.max(maxY, r.gy)
   }
   const w = (maxX - minX + 1) * (cell + gap)
-  const x0 = VW - w - 6, y0 = 34
+  const x0 = VW - w - 8, y0 = 36
+  // 底板，防止和战场混在一起
+  const hAll = (maxY - minY + 1) * (cell + gap)
+  g.fillStyle = 'rgba(7,7,13,0.55)'
+  g.fillRect(x0 - 4, y0 - 4, w + 8, hAll + 8)
+
   for (const r of gm.floor.rooms.values()) {
-    // 未访问且不相邻于已访问的房间不显示，保留探索感
     const adj = DIR_LIST.some(d => {
       const v = DIRS[d]
       const nr = gm.floor.rooms.get(rkey(r.gx + v.dx, r.gy + v.dy))
@@ -325,19 +330,49 @@ export function drawMinimap(gm: Game) {
     const x = x0 + (r.gx - minX) * (cell + gap)
     const y = y0 + (r.gy - minY) * (cell + gap)
     const cur = rkey(r.gx, r.gy) === gm.curKey
-    if (!r.visited) g.fillStyle = '#2a2e4a'
-    else if (r.type === 'boss') g.fillStyle = '#b13e53'
-    else if (r.type === 'treasure') g.fillStyle = '#ffd75e'
-    else if (r.type === 'shop') g.fillStyle = '#57e6a0'
-    else if (r.type === 'devil') g.fillStyle = '#b98cff'
-    else if (r.type === 'angel') g.fillStyle = '#ffe9a8'
-    else if (r.type === 'challenge') g.fillStyle = '#ff9f4f'
-    else g.fillStyle = r.cleared ? '#3f4870' : '#5c6285'
+
+    // 底色
+    if (!r.visited) g.fillStyle = '#232743'
+    else if (r.cleared) g.fillStyle = '#3f4870'
+    else g.fillStyle = '#5c6285'
     g.fillRect(x, y, cell, cell)
+
+    // 有敌人未清（已访问）：红色脉动 —— 一眼看出哪里还有仗要打
+    if (r.visited && !r.cleared && r.type !== 'treasure' && r.type !== 'shop'
+        && r.type !== 'devil' && r.type !== 'angel' && r.type !== 'vault' && r.type !== 'sacrifice') {
+      g.fillStyle = Math.floor(gm.frameT * 3) % 2 === 0 ? '#c04858' : '#8c3040'
+      g.fillRect(x, y, cell, cell)
+    }
+
+    // 类型字母角标（比纯色块可读得多）
+    const mark: [string, string] | null =
+      r.type === 'boss' ? ['B', '#ff8098'] :
+      r.type === 'treasure' ? (r.looted ? ['宝', '#8a7840'] : ['宝', '#ffd75e']) :
+      r.type === 'shop' ? ['店', '#57e6a0'] :
+      r.type === 'devil' ? ['魔', '#b98cff'] :
+      r.type === 'angel' ? ['天', '#ffe9a8'] :
+      r.type === 'challenge' ? ['挑', '#ff9f4f'] :
+      r.type === 'vault' ? ['库', '#ffc85a'] :
+      r.type === 'sacrifice' ? ['祭', '#c86478'] : null
+    if (mark && r.visited) {
+      g.textAlign = 'center'
+      g.font = 'bold 8px monospace'
+      g.fillStyle = mark[1]
+      g.fillText(mark[0], x + cell / 2, y + cell - 3)
+    } else if (mark && !r.visited) {
+      // 未探索的特殊房只给问号，保留一点悬念但提示值得去
+      g.textAlign = 'center'
+      g.font = 'bold 8px monospace'
+      g.fillStyle = '#9aa4c8'
+      g.fillText('?', x + cell / 2, y + cell - 3)
+    }
+
+    // 当前位置
     if (cur) {
       g.strokeStyle = '#ffffff'
+      g.lineWidth = 1.5
+      g.strokeRect(x - 1, y - 1, cell + 2, cell + 2)
       g.lineWidth = 1
-      g.strokeRect(x - 0.5, y - 0.5, cell + 1, cell + 1)
     }
   }
 }
@@ -1692,6 +1727,34 @@ export function drawRoom(gm: Game, sx: number, sy: number) {
       } else {
         if (horiz) g.fillRect(cx - w / 2 + 2, cy - 1, w - 4, 2)
         else g.fillRect(cx - 1, cy - h / 2 + 2, 2, h - 4)
+      }
+
+      // 门后是什么：直接标在门口（试玩反馈"不知道哪个房间有怪"）
+      if (open) {
+        const nb = gm.floor.rooms.get(rkey(r.gx + v.dx, r.gy + v.dy))
+        if (nb) {
+          let tag = '', tcol = '#9aa4c8'
+          if (nb.type === 'boss') { tag = nb.cleared ? 'BOSS·已清' : 'BOSS'; tcol = '#ff4f6b' }
+          else if (nb.type === 'treasure') { tag = nb.looted ? '宝箱·已取' : '宝箱'; tcol = '#ffd75e' }
+          else if (nb.type === 'shop') { tag = '商店'; tcol = '#57e6a0' }
+          else if (nb.type === 'devil') { tag = '恶魔'; tcol = '#b98cff' }
+          else if (nb.type === 'angel') { tag = '天使'; tcol = '#ffe9a8' }
+          else if (nb.type === 'challenge') { tag = nb.cleared ? '挑战·完成' : '挑战'; tcol = '#ff9f4f' }
+          else if (nb.type === 'vault') { tag = '宝库'; tcol = '#ffc85a' }
+          else if (nb.type === 'sacrifice') { tag = '献祭'; tcol = '#c86478' }
+          else if (!nb.cleared) { tag = '有敌人'; tcol = '#ff6b6b' }
+          else { tag = '已清'; tcol = '#5c6285' }
+          const pulse = tag === '有敌人' || tag === 'BOSS'
+          if (pulse) g.globalAlpha = 0.65 + Math.sin(gm.frameT * 4) * 0.3
+          g.textAlign = 'center'
+          g.font = pulse ? 'bold 8px monospace' : '7px monospace'
+          g.fillStyle = tcol
+          // 标签内移一点，避免被墙裁掉
+          const tx = cx - v.dx * 26
+          const ty = cy - v.dy * 22 + (horiz ? 0 : 3)
+          g.fillText(tag, tx, ty)
+          g.globalAlpha = 1
+        }
       }
     }
   }
